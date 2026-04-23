@@ -1,7 +1,7 @@
-fastapi==0.115.5
-uvicorn[standard]==0.32.1
-yfinance==0.2.50
-pandas==2.2.3
-pandas-ta==0.4.67b0
-pydantic==2.10.3
-httpx==0.28.0
+fastapi
+uvicorn[standard]
+yfinance
+pandas
+pandas-ta
+pydantic
+httpx
