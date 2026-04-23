@@ -1,22 +1,22 @@
 <svg width="400" height="400" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">
-  <rect width="400" height="400" fill="#0D1117" rx="16"/>
-  <circle cx="200" cy="180" r="110" fill="none" stroke="#185FA5" stroke-width="0.3" opacity="0.3"/>
-  <circle cx="200" cy="180" r="80" fill="none" stroke="#185FA5" stroke-width="0.3" opacity="0.2"/>
-  <line x1="100" y1="120" x2="200" y2="180" stroke="#185FA5" stroke-width="1.5" opacity="0.7"/>
-  <line x1="300" y1="120" x2="200" y2="180" stroke="#85B7EB" stroke-width="1.5" opacity="0.7"/>
-  <line x1="200" y1="270" x2="200" y2="180" stroke="#7F77DD" stroke-width="1.5" opacity="0.7"/>
-  <line x1="100" y1="120" x2="300" y2="120" stroke="#185FA5" stroke-width="0.5" opacity="0.25"/>
-  <line x1="100" y1="120" x2="200" y2="270" stroke="#7F77DD" stroke-width="0.5" opacity="0.25"/>
-  <line x1="300" y1="120" x2="200" y2="270" stroke="#85B7EB" stroke-width="0.5" opacity="0.25"/>
-  <circle cx="100" cy="120" r="18" fill="#0D1117" stroke="#185FA5" stroke-width="1.5"/>
-  <circle cx="100" cy="120" r="6" fill="#185FA5"/>
-  <circle cx="300" cy="120" r="18" fill="#0D1117" stroke="#85B7EB" stroke-width="1.5"/>
-  <circle cx="300" cy="120" r="6" fill="#85B7EB"/>
-  <circle cx="200" cy="270" r="18" fill="#0D1117" stroke="#7F77DD" stroke-width="1.5"/>
-  <circle cx="200" cy="270" r="6" fill="#7F77DD"/>
-  <circle cx="200" cy="180" r="10" fill="#185FA5" opacity="0.15"/>
-  <circle cx="200" cy="180" r="6" fill="#185FA5" opacity="0.4"/>
-  <circle cx="200" cy="180" r="3" fill="#85B7EB"/>
-  <text x="200" y="338" text-anchor="middle" font-family="system-ui" font-weight="500" font-size="36" fill="#F0F4FA">Quorex</text>
-  <text x="200" y="364" text-anchor="middle" font-family="system-ui" font-weight="400" font-size="11" fill="#6B7A99" letter-spacing="0.08em">TRADING INTELLIGENCE</text>
+  <rect width="400" height="400" fill="white" rx="16"/>
+  <circle cx="200" cy="175" r="110" fill="none" stroke="#185FA5" stroke-width="0.5" opacity="0.2"/>
+  <circle cx="200" cy="175" r="80" fill="none" stroke="#185FA5" stroke-width="0.5" opacity="0.15"/>
+  <line x1="100" y1="115" x2="200" y2="175" stroke="#185FA5" stroke-width="2" opacity="0.8"/>
+  <line x1="300" y1="115" x2="200" y2="175" stroke="#85B7EB" stroke-width="2" opacity="0.8"/>
+  <line x1="200" y1="265" x2="200" y2="175" stroke="#7F77DD" stroke-width="2" opacity="0.8"/>
+  <line x1="100" y1="115" x2="300" y2="115" stroke="#185FA5" stroke-width="0.7" opacity="0.2"/>
+  <line x1="100" y1="115" x2="200" y2="265" stroke="#7F77DD" stroke-width="0.7" opacity="0.2"/>
+  <line x1="300" y1="115" x2="200" y2="265" stroke="#85B7EB" stroke-width="0.7" opacity="0.2"/>
+  <circle cx="100" cy="115" r="18" fill="white" stroke="#185FA5" stroke-width="2"/>
+  <circle cx="100" cy="115" r="7" fill="#185FA5"/>
+  <circle cx="300" cy="115" r="18" fill="white" stroke="#85B7EB" stroke-width="2"/>
+  <circle cx="300" cy="115" r="7" fill="#85B7EB"/>
+  <circle cx="200" cy="265" r="18" fill="white" stroke="#7F77DD" stroke-width="2"/>
+  <circle cx="200" cy="265" r="7" fill="#7F77DD"/>
+  <circle cx="200" cy="175" r="12" fill="#185FA5" opacity="0.1"/>
+  <circle cx="200" cy="175" r="7" fill="#185FA5" opacity="0.3"/>
+  <circle cx="200" cy="175" r="4" fill="#185FA5"/>
+  <text x="200" y="330" text-anchor="middle" font-family="system-ui, sans-serif" font-weight="600" font-size="38" fill="#0D1117">Quor<tspan fill="#185FA5">ex</tspan></text>
+  <text x="200" y="358" text-anchor="middle" font-family="system-ui, sans-serif" font-weight="400" font-size="11" fill="#6B7A99" letter-spacing="3">TRADING INTELLIGENCE</text>
 </svg>
