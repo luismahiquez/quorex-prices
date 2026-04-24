@@ -260,3 +260,8 @@ def search_tickers(q: str):
     except Exception as e:
         logger.error(f"Search error for '{q}': {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@app.get("/vix")
+def get_vix():
+    return get_quote_data("^VIX")
