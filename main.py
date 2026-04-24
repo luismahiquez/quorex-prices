@@ -219,3 +219,44 @@ def cache_stats():
             "expires_in_seconds": max(0, CACHE_TTL_SECONDS - age_seconds)
         })
     return {"total": len(cache), "entries": entries}
+
+@app.get("/search")
+def search_tickers(q: str):
+    q = q.strip().upper()
+    if not q:
+        raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
+
+    try:
+        # Single character: try exact ticker lookup
+        if len(q) == 1:
+            stock = yf.Ticker(q)
+            info = stock.info
+            name = info.get("longName") or info.get("shortName")
+            if name:
+                return [{
+                    "ticker": q,
+                    "name": name,
+                    "exchange": info.get("exchange", ""),
+                    "type": info.get("quoteType", "EQUITY")
+                }]
+            return []
+
+        # 2+ characters: use yfinance Search
+        search = yf.Search(q, max_results=8)
+        quotes = search.quotes or []
+        results = []
+        for item in quotes:
+            ticker = item.get("symbol")
+            name = item.get("longname") or item.get("shortname")
+            if ticker and name:
+                results.append({
+                    "ticker": ticker,
+                    "name": name,
+                    "exchange": item.get("exchange", ""),
+                    "type": item.get("quoteType", "EQUITY")
+                })
+        return results
+
+    except Exception as e:
+        logger.error(f"Search error for '{q}': {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
