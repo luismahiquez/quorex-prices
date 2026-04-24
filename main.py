@@ -220,6 +220,10 @@ def cache_stats():
         })
     return {"total": len(cache), "entries": entries}
 
+@app.get("/vix")
+def get_vix():
+    return get_quote(ticker="^VIX")
+
 @app.get("/search")
 def search_tickers(q: str):
     q = q.strip().upper()
@@ -262,6 +266,4 @@ def search_tickers(q: str):
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
-@app.get("/vix")
-def get_vix():
-    return get_quote_data("^VIX")
+
