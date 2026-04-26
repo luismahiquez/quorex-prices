@@ -223,11 +223,6 @@ def cache_stats():
 def get_vix():
     return get_quote(ticker="^VIX")
 
-# ============================================================
-# AI Market Context Endpoint
-# Add this block without changing /quote/{ticker}
-# ============================================================
-
 class ContextPrice(BaseModel):
     currentPrice: float
     previousClose: Optional[float]
@@ -581,6 +576,34 @@ def ctx_mentions_different_ticker(title: str, ticker: str) -> bool:
             return True
     return False
 
+def ctx_title_mentions_current_asset(title: str, ticker: str, company_name: str) -> bool:
+    title_lower = title.lower()
+    ticker_lower = ticker.lower()
+
+    if ctx_keyword_match(title_lower, ticker_lower):
+        return True
+
+    company_words = ctx_company_tokens(company_name)
+
+    return any(ctx_keyword_match(title_lower, word) for word in company_words)
+
+
+def ctx_mentions_different_ticker_only(title: str, ticker: str, company_name: str) -> bool:
+    matches = re.findall(r"\(([A-Z]{1,6})\)", title)
+
+    if not matches:
+        return False
+
+    # If title clearly mentions the current asset, keep it.
+    # Example: "What Makes Peloton (PTON) a New Buy Stock"
+    if ctx_title_mentions_current_asset(title, ticker, company_name):
+        return False
+
+    # If title has another ticker and does not mention the current asset, skip it.
+    # Example: analyzing PTON, but title says "Pool Corp. (POOL)..."
+    return any(match.upper() != ticker.upper() for match in matches)
+
+
 def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
     if not headlines:
         return "Neutral", "No recent relevant news available"
@@ -602,6 +625,179 @@ def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
 
     return sentiment, headlines[0]
 
+def ctx_keyword_match(text: str, keyword: str) -> bool:
+    if not text or not keyword:
+        return False
+
+    text_lower = text.lower()
+    keyword_lower = keyword.lower().strip()
+
+    if len(keyword_lower) <= 3:
+        return re.search(rf"\b{re.escape(keyword_lower)}\b", text_lower) is not None
+
+    return keyword_lower in text_lower
+
+
+def ctx_company_tokens(company_name: str) -> list[str]:
+    ignored_words = {
+        "inc", "corp", "corporation", "company", "class", "plc",
+        "limited", "holdings", "group", "ordinary", "shares",
+        "the", "and", "interactive"
+    }
+
+    words = re.split(r"[^a-zA-Z0-9]+", company_name.lower())
+
+    return [
+        word
+        for word in words
+        if len(word) > 3 and word not in ignored_words
+    ]
+
+
+def ctx_title_mentions_current_asset(title: str, ticker: str, company_name: str) -> bool:
+    title_lower = title.lower()
+    ticker_lower = ticker.lower()
+
+    if ctx_keyword_match(title_lower, ticker_lower):
+        return True
+
+    company_words = ctx_company_tokens(company_name)
+
+    return any(ctx_keyword_match(title_lower, word) for word in company_words)
+
+
+def ctx_mentions_different_ticker_only(title: str, ticker: str, company_name: str) -> bool:
+    matches = re.findall(r"\(([A-Z]{1,6})\)", title)
+
+    if not matches:
+        return False
+
+    # If title clearly mentions the current asset, keep it.
+    # Example: "What Makes Peloton (PTON) a New Buy Stock"
+    if ctx_title_mentions_current_asset(title, ticker, company_name):
+        return False
+
+    # If title has another ticker and does not mention the current asset, skip it.
+    # Example: analyzing PTON, but title says "Pool Corp. (POOL)..."
+    return any(match.upper() != ticker.upper() for match in matches)
+
+
+def ctx_news_relevance(title: str, ticker: str, company_name: str) -> tuple[float, str]:
+    title_lower = title.lower()
+
+    # Asset-specific news
+    if ctx_title_mentions_current_asset(title, ticker, company_name):
+        return 0.95, "asset"
+
+    # Generic sector/theme news
+    sector_words = [
+        "ai",
+        "artificial intelligence",
+        "openai",
+        "cloud",
+        "software",
+        "semiconductor",
+        "semiconductors",
+        "chip",
+        "chips",
+        "gpu",
+        "data center",
+        "datacenter",
+        "big tech",
+        "mag 7",
+        "magnificent seven",
+        "earnings",
+        "guidance",
+        "analyst",
+        "upgrade",
+        "downgrade",
+        "fitness",
+        "consumer",
+        "retail",
+        "subscription",
+        "streaming",
+        "energy",
+        "oil",
+        "banking",
+        "crypto",
+        "bitcoin",
+        "biotech",
+        "healthcare"
+    ]
+
+    if any(ctx_keyword_match(title_lower, word) for word in sector_words):
+        return 0.60, "sector"
+
+    # Macro / market-wide news
+    macro_words = [
+        "fed",
+        "powell",
+        "inflation",
+        "rates",
+        "rate cut",
+        "rate hike",
+        "treasury",
+        "yields",
+        "wall street",
+        "market",
+        "stocks",
+        "s&p",
+        "nasdaq",
+        "dow",
+        "economy",
+        "cpi",
+        "ppi",
+        "jobs",
+        "gdp",
+        "recession"
+    ]
+
+    if any(ctx_keyword_match(title_lower, word) for word in macro_words):
+        return 0.55, "macro"
+
+    return 0.20, "irrelevant"
+
+def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
+    if not headlines:
+        return "Neutral", "No recent relevant news available"
+
+    positive_words = [
+        "upgrade", "beat", "strong", "growth", "bullish", "buy",
+        "surge", "rally", "record", "positive", "optimism",
+        "outperform", "raise", "raised", "boost", "rebound",
+        "upside", "tops", "beats"
+    ]
+
+    negative_words = [
+        "downgrade", "miss", "weak", "decline", "bearish", "sell",
+        "drop", "fall", "concern", "risk", "warning", "cut",
+        "lawsuit", "probe", "investigation", "slowdown", "value trap"
+    ]
+
+    pos_count = sum(
+        1
+        for headline in headlines
+        for word in positive_words
+        if word in headline.lower()
+    )
+
+    neg_count = sum(
+        1
+        for headline in headlines
+        for word in negative_words
+        if word in headline.lower()
+    )
+
+    if pos_count > neg_count + 1:
+        sentiment = "Positive"
+    elif neg_count > pos_count + 1:
+        sentiment = "Negative"
+    elif pos_count > 0 or neg_count > 0:
+        sentiment = "Mixed"
+    else:
+        sentiment = "Neutral"
+
+    return sentiment, headlines[0]
 
 @app.get("/context/{ticker}", response_model=MarketContextResponse)
 def get_market_context(ticker: str):
@@ -774,9 +970,11 @@ def get_market_context(ticker: str):
         # News
         # -------------------------
         raw_news = []
-
+        all_news_count = 0
+        
         try:
             news_items = stock.news or []
+            all_news_count = len(news_items)
         
             for item in news_items[:10]:
                 content = item.get("content", {}) if isinstance(item, dict) else {}
@@ -796,35 +994,44 @@ def get_market_context(ticker: str):
                 else:
                     pub_date = str(pub_date)[:10] if pub_date else None
         
-                if title:
-                    # NEW: skip news clearly about another ticker
-                    if ctx_mentions_different_ticker(title, ticker):
-                        continue
+                if not title:
+                    continue
         
-                    relevance, category = ctx_news_relevance(title, ticker, company_name)
+                # Skip headlines clearly about another ticker.
+                # Example: analyzing PTON but title says "Pool Corp. (POOL)..."
+                if ctx_mentions_different_ticker_only(title, ticker, company_name):
+                    continue
         
-                    if relevance >= 0.55:
-                        raw_news.append(
-                            ContextNewsItem(
-                                title=title,
-                                publisher=publisher,
-                                date=pub_date,
-                                relevanceScore=relevance,
-                                category=category
-                            )
+                relevance, category = ctx_news_relevance(
+                    title=title,
+                    ticker=ticker,
+                    company_name=company_name
+                )
+        
+                if relevance >= 0.55:
+                    raw_news.append(
+                        ContextNewsItem(
+                            title=title,
+                            publisher=publisher,
+                            date=pub_date,
+                            relevanceScore=relevance,
+                            category=category
                         )
+                    )
         
         except Exception as e:
             logger.warning(f"News fetch failed for {ticker}: {e}")
             missing_data.append("Recent News")
         
-        if not raw_news:
+        if all_news_count == 0:
+            missing_data.append("Recent News")
+        
+        if all_news_count > 0 and not raw_news:
             missing_data.append("Relevant News")
         
         headline_texts = [n.title for n in raw_news]
         sentiment, _ = ctx_news_sentiment(headline_texts)
         
-        # NEW: main catalyst should prefer asset-specific news
         asset_news = [n for n in raw_news if n.category == "asset"]
         
         if asset_news:
@@ -837,7 +1044,7 @@ def get_market_context(ticker: str):
             sentiment=sentiment,
             mainCatalyst=catalyst,
             headlines=raw_news[:5]
-        )       
+        )
 
         return MarketContextResponse(
             ticker=ticker,
