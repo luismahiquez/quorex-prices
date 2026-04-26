@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
