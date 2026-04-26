@@ -223,6 +223,11 @@ def cache_stats():
 def get_vix():
     return get_quote(ticker="^VIX")
 
+# ============================================================
+# AI Market Context Section
+# Add this section without modifying /quote, /vix, /search, etc.
+# ============================================================
+
 class ContextPrice(BaseModel):
     currentPrice: float
     previousClose: Optional[float]
@@ -288,9 +293,14 @@ class MarketContextResponse(BaseModel):
     cached_at: Optional[str] = None
 
 
+# ============================================================
+# Context helpers
+# ============================================================
+
 def ctx_percent_distance(current: Optional[float], reference: Optional[float]) -> Optional[float]:
     if current is None or reference is None or reference == 0:
         return None
+
     return round(((current - reference) / reference) * 100, 2)
 
 
@@ -327,7 +337,12 @@ def ctx_last_trading_session(hist) -> Optional[str]:
             return None
 
         last_index = hist.index[-1]
-        return last_index.strftime("%Y-%m-%d")
+
+        if hasattr(last_index, "strftime"):
+            return last_index.strftime("%Y-%m-%d")
+
+        return str(last_index)[:10]
+
     except Exception:
         return None
 
@@ -335,20 +350,26 @@ def ctx_last_trading_session(hist) -> Optional[str]:
 def ctx_rsi_status(rsi: Optional[float]) -> str:
     if rsi is None:
         return "Unavailable"
+
     if rsi >= 70:
         return "Overbought"
+
     if rsi >= 60:
         return "Bullish"
+
     if rsi >= 45:
         return "Neutral"
+
     if rsi >= 30:
         return "Weak"
+
     return "Oversold"
 
 
 def ctx_volume_ratio(volume: int, avg_volume: Optional[int]) -> Optional[float]:
     if not avg_volume or avg_volume == 0:
         return None
+
     return round(volume / avg_volume, 2)
 
 
@@ -373,7 +394,12 @@ def ctx_volume_status(volume: int, avg_volume: Optional[int]) -> str:
     return f"Below average volume ({ratio:.1f}x average)"
 
 
-def ctx_trend(price: float, sma20: Optional[float], sma50: Optional[float], sma200: Optional[float]) -> str:
+def ctx_trend(
+    price: float,
+    sma20: Optional[float],
+    sma50: Optional[float],
+    sma200: Optional[float]
+) -> str:
     above = []
     below = []
 
@@ -398,7 +424,11 @@ def ctx_trend(price: float, sma20: Optional[float], sma50: Optional[float], sma2
     return "Insufficient data for trend analysis"
 
 
-def ctx_momentum_status(price: float, sma20: Optional[float], rsi: Optional[float]) -> str:
+def ctx_momentum_status(
+    price: float,
+    sma20: Optional[float],
+    rsi: Optional[float]
+) -> str:
     if sma20 is None or rsi is None:
         return "Unavailable"
 
@@ -425,9 +455,9 @@ def ctx_support_resistance(
     sma20: Optional[float],
     sma50: Optional[float],
     sma200: Optional[float],
-    high52w: Optional[float]
+    high52w: Optional[float],
+    low52w: Optional[float]
 ) -> tuple[list[float], list[float]]:
-
     support = []
     resistance = []
 
@@ -449,10 +479,11 @@ def ctx_support_resistance(
 
             low_20 = safe_float(recent["Low"].tail(20).min())
             low_60 = safe_float(recent["Low"].min())
+
             high_20 = safe_float(recent["High"].tail(20).max())
             high_60 = safe_float(recent["High"].max())
 
-            for level in [low_20, low_60, sma20, sma50, sma200]:
+            for level in [low_20, low_60, sma20, sma50, sma200, low52w]:
                 if level and level < price:
                     add_level(support, level)
 
@@ -460,9 +491,10 @@ def ctx_support_resistance(
                 if level and level > price:
                     add_level(resistance, level)
 
-        # Psychological levels every $5
+        # Psychological levels every $5 for stocks above $20
         if price >= 20:
             below = round(price / 5) * 5
+
             if below >= price:
                 below -= 5
 
@@ -531,99 +563,9 @@ def ctx_fundamental_summary(
     return ", ".join(parts).capitalize() + "."
 
 
-def ctx_news_relevance(title: str, ticker: str, company_name: str) -> tuple[float, str]:
-    title_lower = title.lower()
-    ticker_lower = ticker.lower()
-
-    company_words = [
-        w.lower()
-        for w in company_name.replace(",", "").replace(".", "").split()
-        if len(w) > 3 and w.lower() not in ["inc", "corp", "corporation", "company", "class"]
-    ]
-
-    if ticker_lower in title_lower:
-        return 0.95, "asset"
-
-    for word in company_words:
-        if word in title_lower:
-            return 0.95, "asset"
-
-    sector_words = [
-        "ai", "artificial intelligence", "chip", "semiconductor", "gpu",
-        "data center", "datacenter", "tech", "nasdaq", "mag 7",
-        "magnificent seven", "earnings"
-    ]
-
-    macro_words = [
-        "fed", "powell", "inflation", "rates", "treasury", "yields",
-        "wall street", "market", "stocks", "s&p", "nasdaq"
-    ]
-
-    if any(word in title_lower for word in sector_words):
-        return 0.75, "sector"
-
-    if any(word in title_lower for word in macro_words):
-        return 0.60, "macro"
-
-    return 0.20, "irrelevant"
-
-
-def ctx_mentions_different_ticker(title: str, ticker: str) -> bool:
-    matches = re.findall(r"\(([A-Z]{1,6})\)", title)
-
-    for match in matches:
-        if match.upper() != ticker.upper():
-            return True
-    return False
-
-def ctx_title_mentions_current_asset(title: str, ticker: str, company_name: str) -> bool:
-    title_lower = title.lower()
-    ticker_lower = ticker.lower()
-
-    if ctx_keyword_match(title_lower, ticker_lower):
-        return True
-
-    company_words = ctx_company_tokens(company_name)
-
-    return any(ctx_keyword_match(title_lower, word) for word in company_words)
-
-
-def ctx_mentions_different_ticker_only(title: str, ticker: str, company_name: str) -> bool:
-    matches = re.findall(r"\(([A-Z]{1,6})\)", title)
-
-    if not matches:
-        return False
-
-    # If title clearly mentions the current asset, keep it.
-    # Example: "What Makes Peloton (PTON) a New Buy Stock"
-    if ctx_title_mentions_current_asset(title, ticker, company_name):
-        return False
-
-    # If title has another ticker and does not mention the current asset, skip it.
-    # Example: analyzing PTON, but title says "Pool Corp. (POOL)..."
-    return any(match.upper() != ticker.upper() for match in matches)
-
-
-def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
-    if not headlines:
-        return "Neutral", "No recent relevant news available"
-
-    positive_words = ["upgrade", "beat", "strong", "growth", "bullish", "buy", "surge", "rally", "record", "positive", "optimism"]
-    negative_words = ["downgrade", "miss", "weak", "decline", "bearish", "sell", "drop", "fall", "concern", "risk", "warning"]
-
-    pos_count = sum(1 for h in headlines for w in positive_words if w in h.lower())
-    neg_count = sum(1 for h in headlines for w in negative_words if w in h.lower())
-
-    if pos_count > neg_count + 1:
-        sentiment = "Positive"
-    elif neg_count > pos_count + 1:
-        sentiment = "Negative"
-    elif pos_count > 0 or neg_count > 0:
-        sentiment = "Mixed"
-    else:
-        sentiment = "Neutral"
-
-    return sentiment, headlines[0]
+# ============================================================
+# News helpers
+# ============================================================
 
 def ctx_keyword_match(text: str, keyword: str) -> bool:
     if not text or not keyword:
@@ -640,9 +582,20 @@ def ctx_keyword_match(text: str, keyword: str) -> bool:
 
 def ctx_company_tokens(company_name: str) -> list[str]:
     ignored_words = {
-        "inc", "corp", "corporation", "company", "class", "plc",
-        "limited", "holdings", "group", "ordinary", "shares",
-        "the", "and", "interactive"
+        "inc",
+        "corp",
+        "corporation",
+        "company",
+        "class",
+        "plc",
+        "limited",
+        "holdings",
+        "group",
+        "ordinary",
+        "shares",
+        "the",
+        "and",
+        "interactive"
     }
 
     words = re.split(r"[^a-zA-Z0-9]+", company_name.lower())
@@ -672,13 +625,13 @@ def ctx_mentions_different_ticker_only(title: str, ticker: str, company_name: st
     if not matches:
         return False
 
-    # If title clearly mentions the current asset, keep it.
+    # Keep it if it clearly mentions the current asset.
     # Example: "What Makes Peloton (PTON) a New Buy Stock"
     if ctx_title_mentions_current_asset(title, ticker, company_name):
         return False
 
-    # If title has another ticker and does not mention the current asset, skip it.
-    # Example: analyzing PTON, but title says "Pool Corp. (POOL)..."
+    # Skip it if it has another ticker and does not mention the current asset.
+    # Example: analyzing PTON but title says "Pool Corp. (POOL)..."
     return any(match.upper() != ticker.upper() for match in matches)
 
 
@@ -757,21 +710,51 @@ def ctx_news_relevance(title: str, ticker: str, company_name: str) -> tuple[floa
 
     return 0.20, "irrelevant"
 
+
 def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
     if not headlines:
         return "Neutral", "No recent relevant news available"
 
     positive_words = [
-        "upgrade", "beat", "strong", "growth", "bullish", "buy",
-        "surge", "rally", "record", "positive", "optimism",
-        "outperform", "raise", "raised", "boost", "rebound",
-        "upside", "tops", "beats"
+        "upgrade",
+        "beat",
+        "strong",
+        "growth",
+        "bullish",
+        "buy",
+        "surge",
+        "rally",
+        "record",
+        "positive",
+        "optimism",
+        "outperform",
+        "raise",
+        "raised",
+        "boost",
+        "rebound",
+        "upside",
+        "tops",
+        "beats"
     ]
 
     negative_words = [
-        "downgrade", "miss", "weak", "decline", "bearish", "sell",
-        "drop", "fall", "concern", "risk", "warning", "cut",
-        "lawsuit", "probe", "investigation", "slowdown", "value trap"
+        "downgrade",
+        "miss",
+        "weak",
+        "decline",
+        "bearish",
+        "sell",
+        "drop",
+        "fall",
+        "concern",
+        "risk",
+        "warning",
+        "cut",
+        "lawsuit",
+        "probe",
+        "investigation",
+        "slowdown",
+        "value trap"
     ]
 
     pos_count = sum(
@@ -799,6 +782,11 @@ def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
 
     return sentiment, headlines[0]
 
+
+# ============================================================
+# AI Market Context Endpoint
+# ============================================================
+
 @app.get("/context/{ticker}", response_model=MarketContextResponse)
 def get_market_context(ticker: str):
     ticker = ticker.upper().strip()
@@ -823,6 +811,7 @@ def get_market_context(ticker: str):
         # -------------------------
         # Price
         # -------------------------
+
         price = safe_float(
             info.get("regularMarketPrice")
             or info.get("currentPrice")
@@ -835,7 +824,10 @@ def get_market_context(ticker: str):
         if price is None:
             raise HTTPException(status_code=404, detail=f"No price data for '{ticker}'")
 
-        prev_close = safe_float(info.get("previousClose") or info.get("regularMarketPreviousClose"))
+        prev_close = safe_float(
+            info.get("previousClose")
+            or info.get("regularMarketPreviousClose")
+        )
 
         if prev_close is None and hist is not None and not hist.empty:
             closes = hist["Close"].dropna()
@@ -845,7 +837,13 @@ def get_market_context(ticker: str):
         change_pct = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
 
         volume = int(info.get("regularMarketVolume") or info.get("volume") or 0)
-        avg_volume = int(info.get("averageVolume") or info.get("averageDailyVolume10Day") or 0) or None
+
+        avg_volume = int(
+            info.get("averageVolume")
+            or info.get("averageDailyVolume10Day")
+            or 0
+        ) or None
+
         volume_ratio = ctx_volume_ratio(volume, avg_volume)
 
         high52w = safe_float(info.get("fiftyTwoWeekHigh"))
@@ -854,8 +852,10 @@ def get_market_context(ticker: str):
 
         if avg_volume is None:
             missing_data.append("Average Volume")
+
         if high52w is None:
             missing_data.append("52-Week High")
+
         if low52w is None:
             missing_data.append("52-Week Low")
 
@@ -874,6 +874,7 @@ def get_market_context(ticker: str):
         # -------------------------
         # Technical
         # -------------------------
+
         rsi_val = None
         sma20_val = None
         sma50_val = None
@@ -890,19 +891,29 @@ def get_market_context(ticker: str):
                 missing_data.append("RSI")
 
             if len(close) >= 20:
-                sma20_val = safe_float(ta.sma(close, length=20).iloc[-1])
+                try:
+                    sma20_val = safe_float(ta.sma(close, length=20).iloc[-1])
+                except Exception:
+                    missing_data.append("SMA20")
             else:
                 missing_data.append("SMA20")
 
             if len(close) >= 50:
-                sma50_val = safe_float(ta.sma(close, length=50).iloc[-1])
+                try:
+                    sma50_val = safe_float(ta.sma(close, length=50).iloc[-1])
+                except Exception:
+                    missing_data.append("SMA50")
             else:
                 missing_data.append("SMA50")
 
             if len(close) >= 200:
-                sma200_val = safe_float(ta.sma(close, length=200).iloc[-1])
+                try:
+                    sma200_val = safe_float(ta.sma(close, length=200).iloc[-1])
+                except Exception:
+                    missing_data.append("SMA200")
             else:
                 missing_data.append("SMA200")
+
         else:
             missing_data.extend(["RSI", "SMA20", "SMA50", "SMA200"])
 
@@ -912,7 +923,8 @@ def get_market_context(ticker: str):
             sma20=sma20_val,
             sma50=sma50_val,
             sma200=sma200_val,
-            high52w=high52w
+            high52w=high52w,
+            low52w=low52w
         )
 
         tech_ctx = ContextTechnical(
@@ -931,6 +943,7 @@ def get_market_context(ticker: str):
         # -------------------------
         # Fundamentals
         # -------------------------
+
         market_cap = safe_float(info.get("marketCap"))
         pe_ratio = safe_float(info.get("trailingPE") or info.get("forwardPE"))
         eps = safe_float(info.get("trailingEps") or info.get("forwardEps"))
@@ -940,14 +953,19 @@ def get_market_context(ticker: str):
 
         if market_cap is None:
             missing_data.append("Market Cap")
+
         if pe_ratio is None:
             missing_data.append("P/E Ratio")
+
         if eps is None:
             missing_data.append("EPS")
+
         if revenue_growth is None:
             missing_data.append("Revenue Growth")
+
         if profit_margins is None:
             missing_data.append("Profit Margins")
+
         if debt_to_equity is None:
             missing_data.append("Debt To Equity")
 
@@ -969,45 +987,68 @@ def get_market_context(ticker: str):
         # -------------------------
         # News
         # -------------------------
+
         raw_news = []
         all_news_count = 0
-        
+
         try:
             news_items = stock.news or []
+
+            # Fallback: sometimes yf.Ticker(ticker).news returns empty.
+            if not news_items:
+                try:
+                    search = yf.Search(ticker, max_results=10)
+                    news_items = getattr(search, "news", None) or []
+                except Exception as search_ex:
+                    logger.warning(f"Search news fallback failed for {ticker}: {search_ex}")
+
             all_news_count = len(news_items)
-        
+            logger.info(f"{ticker} news items found: {all_news_count}")
+
             for item in news_items[:10]:
                 content = item.get("content", {}) if isinstance(item, dict) else {}
-        
-                title = content.get("title") or item.get("title", "")
-        
+
+                title = (
+                    content.get("title")
+                    or item.get("title", "")
+                )
+
                 publisher = (
                     content.get("provider", {}).get("displayName")
                     if isinstance(content.get("provider"), dict)
                     else None
                 ) or item.get("publisher", "")
-        
-                pub_date = content.get("pubDate") or item.get("providerPublishTime", "")
-        
+
+                pub_date = (
+                    content.get("pubDate")
+                    or item.get("providerPublishTime", "")
+                )
+
                 if isinstance(pub_date, int):
                     pub_date = datetime.utcfromtimestamp(pub_date).strftime("%Y-%m-%d")
                 else:
                     pub_date = str(pub_date)[:10] if pub_date else None
-        
+
                 if not title:
                     continue
-        
+
                 # Skip headlines clearly about another ticker.
                 # Example: analyzing PTON but title says "Pool Corp. (POOL)..."
                 if ctx_mentions_different_ticker_only(title, ticker, company_name):
+                    logger.info(f"{ticker} skipped different ticker news: {title}")
                     continue
-        
+
                 relevance, category = ctx_news_relevance(
                     title=title,
                     ticker=ticker,
                     company_name=company_name
                 )
-        
+
+                logger.info(
+                    f"{ticker} news relevance={relevance}, "
+                    f"category={category}, title={title}"
+                )
+
                 if relevance >= 0.55:
                     raw_news.append(
                         ContextNewsItem(
@@ -1018,28 +1059,30 @@ def get_market_context(ticker: str):
                             category=category
                         )
                     )
-        
+
         except Exception as e:
             logger.warning(f"News fetch failed for {ticker}: {e}")
             missing_data.append("Recent News")
-        
+
         if all_news_count == 0:
             missing_data.append("Recent News")
-        
+
         if all_news_count > 0 and not raw_news:
             missing_data.append("Relevant News")
-        
+
         headline_texts = [n.title for n in raw_news]
         sentiment, _ = ctx_news_sentiment(headline_texts)
-        
+
         asset_news = [n for n in raw_news if n.category == "asset"]
-        
+
         if asset_news:
             catalyst = asset_news[0].title
         else:
             catalyst = "No strong asset-specific catalyst detected; current news is mostly sector or macro related."
-            missing_data.append("Asset-specific News")
-        
+
+            if raw_news:
+                missing_data.append("Asset-specific News")
+
         news_ctx = ContextNews(
             sentiment=sentiment,
             mainCatalyst=catalyst,
