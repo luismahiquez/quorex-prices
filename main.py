@@ -573,6 +573,14 @@ def ctx_news_relevance(title: str, ticker: str, company_name: str) -> tuple[floa
     return 0.20, "irrelevant"
 
 
+def ctx_mentions_different_ticker(title: str, ticker: str) -> bool:
+    matches = re.findall(r"\(([A-Z]{1,6})\)", title)
+
+    for match in matches:
+        if match.upper() != ticker.upper():
+            return True
+    return False
+
 def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
     if not headlines:
         return "Neutral", "No recent relevant news available"
@@ -769,28 +777,32 @@ def get_market_context(ticker: str):
 
         try:
             news_items = stock.news or []
-
+        
             for item in news_items[:10]:
                 content = item.get("content", {}) if isinstance(item, dict) else {}
-
+        
                 title = content.get("title") or item.get("title", "")
-
+        
                 publisher = (
                     content.get("provider", {}).get("displayName")
                     if isinstance(content.get("provider"), dict)
                     else None
                 ) or item.get("publisher", "")
-
+        
                 pub_date = content.get("pubDate") or item.get("providerPublishTime", "")
-
+        
                 if isinstance(pub_date, int):
                     pub_date = datetime.utcfromtimestamp(pub_date).strftime("%Y-%m-%d")
                 else:
                     pub_date = str(pub_date)[:10] if pub_date else None
-
+        
                 if title:
+                    # NEW: skip news clearly about another ticker
+                    if ctx_mentions_different_ticker(title, ticker):
+                        continue
+        
                     relevance, category = ctx_news_relevance(title, ticker, company_name)
-
+        
                     if relevance >= 0.55:
                         raw_news.append(
                             ContextNewsItem(
@@ -801,22 +813,31 @@ def get_market_context(ticker: str):
                                 category=category
                             )
                         )
-
+        
         except Exception as e:
             logger.warning(f"News fetch failed for {ticker}: {e}")
             missing_data.append("Recent News")
-
+        
         if not raw_news:
             missing_data.append("Relevant News")
-
+        
         headline_texts = [n.title for n in raw_news]
-        sentiment, catalyst = ctx_news_sentiment(headline_texts)
-
+        sentiment, _ = ctx_news_sentiment(headline_texts)
+        
+        # NEW: main catalyst should prefer asset-specific news
+        asset_news = [n for n in raw_news if n.category == "asset"]
+        
+        if asset_news:
+            catalyst = asset_news[0].title
+        else:
+            catalyst = "No strong asset-specific catalyst detected; current news is mostly sector or macro related."
+            missing_data.append("Asset-specific News")
+        
         news_ctx = ContextNews(
             sentiment=sentiment,
             mainCatalyst=catalyst,
             headlines=raw_news[:5]
-        )
+        )       
 
         return MarketContextResponse(
             ticker=ticker,
