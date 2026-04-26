@@ -1068,7 +1068,40 @@ def get_market_context(ticker: str):
             missing_data.append("Recent News")
 
         if all_news_count > 0 and not raw_news:
-            missing_data.append("Relevant News")
+            # Fallback: include best available news sorted by relevance
+            fallback_news = []
+            for item in news_items[:10]:
+                content = item.get("content", {}) if isinstance(item, dict) else {}
+                title = content.get("title") or item.get("title", "")
+                publisher = (
+                    content.get("provider", {}).get("displayName")
+                    if isinstance(content.get("provider"), dict)
+                    else None
+                ) or item.get("publisher", "")
+                pub_date = content.get("pubDate") or item.get("providerPublishTime", "")
+                if isinstance(pub_date, int):
+                    pub_date = datetime.utcfromtimestamp(pub_date).strftime("%Y-%m-%d")
+                else:
+                    pub_date = str(pub_date)[:10] if pub_date else None
+                if not title:
+                    continue
+                if ctx_mentions_different_ticker_only(title, ticker, company_name):
+                    continue
+                relevance, category = ctx_news_relevance(title, ticker, company_name)
+                fallback_news.append(ContextNewsItem(
+                    title=title,
+                    publisher=publisher,
+                    date=pub_date,
+                    relevanceScore=relevance,
+                    category=category
+                ))
+            # Sort by relevance and take top 3
+            fallback_news.sort(key=lambda x: x.relevanceScore or 0, reverse=True)
+            raw_news = fallback_news[:3]
+            if raw_news:
+                missing_data.append("Asset-specific News")
+            else:
+                missing_data.append("Relevant News")
 
         headline_texts = [n.title for n in raw_news]
         sentiment, _ = ctx_news_sentiment(headline_texts)
@@ -1077,11 +1110,12 @@ def get_market_context(ticker: str):
 
         if asset_news:
             catalyst = asset_news[0].title
-        else:
-            catalyst = "No strong asset-specific catalyst detected; current news is mostly sector or macro related."
-
-            if raw_news:
+        elif raw_news:
+            catalyst = f"No asset-specific news. Best available: {raw_news[0].title}"
+            if "Asset-specific News" not in missing_data:
                 missing_data.append("Asset-specific News")
+        else:
+            catalyst = "No relevant news available at this time."
 
         news_ctx = ContextNews(
             sentiment=sentiment,
