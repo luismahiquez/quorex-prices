@@ -223,155 +223,361 @@ def cache_stats():
 def get_vix():
     return get_quote(ticker="^VIX")
 
-class TechnicalContext(BaseModel):
+# ============================================================
+# AI Market Context Endpoint
+# Add this block without changing /quote/{ticker}
+# ============================================================
+
+class ContextPrice(BaseModel):
+    currentPrice: float
+    previousClose: Optional[float]
+    changePercent: float
+    volume: int
+    averageVolume: Optional[int]
+    volumeRatio: Optional[float]
+    fiftyTwoWeekHigh: Optional[float]
+    fiftyTwoWeekLow: Optional[float]
+    distanceFrom52WeekHighPercent: Optional[float]
+
+
+class ContextTechnical(BaseModel):
     rsi: Optional[float]
+    rsiStatus: str
     sma20: Optional[float]
     sma50: Optional[float]
     sma200: Optional[float]
     trend: str
+    momentumStatus: str
     volumeStatus: str
     supportLevels: list[float]
     resistanceLevels: list[float]
 
-class PriceContext(BaseModel):
-    currentPrice: float
-    changePercent: float
-    volume: int
-    averageVolume: Optional[int]
-    fiftyTwoWeekHigh: Optional[float]
-    fiftyTwoWeekLow: Optional[float]
 
-class FundamentalContext(BaseModel):
+class ContextFundamental(BaseModel):
     marketCap: Optional[float]
     peRatio: Optional[float]
     eps: Optional[float]
     revenueGrowth: Optional[float]
     profitMargins: Optional[float]
     debtToEquity: Optional[float]
+    fundamentalSummary: str
 
-class NewsItem(BaseModel):
+
+class ContextNewsItem(BaseModel):
     title: str
     publisher: Optional[str]
     date: Optional[str]
+    relevanceScore: Optional[float]
+    category: Optional[str]
 
-class NewsContext(BaseModel):
+
+class ContextNews(BaseModel):
     sentiment: str
     mainCatalyst: str
-    headlines: list[NewsItem]
+    headlines: list[ContextNewsItem]
+
 
 class MarketContextResponse(BaseModel):
     ticker: str
     companyName: str
     assetType: str
     analysisDate: str
-    priceContext: PriceContext
-    technicalContext: TechnicalContext
-    fundamentalContext: FundamentalContext
-    newsContext: NewsContext
+    marketStatus: str
+    lastTradingSession: Optional[str]
+    priceAsOf: Optional[str]
+    priceContext: ContextPrice
+    technicalContext: ContextTechnical
+    fundamentalContext: ContextFundamental
+    newsContext: ContextNews
     missingData: list[str]
     cached_at: Optional[str] = None
 
-# Context cache (5 min TTL — more aggressive refresh for analysis)
-context_cache: dict = {}
-CONTEXT_CACHE_TTL = 5 * 60
+
+def ctx_percent_distance(current: Optional[float], reference: Optional[float]) -> Optional[float]:
+    if current is None or reference is None or reference == 0:
+        return None
+    return round(((current - reference) / reference) * 100, 2)
 
 
-def get_cached_context(ticker: str) -> Optional[MarketContextResponse]:
-    if ticker in context_cache:
-        entry = context_cache[ticker]
-        if time.time() - entry["timestamp"] < CONTEXT_CACHE_TTL:
-            return entry["data"]
-        else:
-            del context_cache[ticker]
-    return None
-
-
-def set_context_cache(ticker: str, data: MarketContextResponse):
-    context_cache[ticker] = {
-        "timestamp": time.time(),
-        "data": data
-    }
-
-
-def detect_asset_type(info: dict) -> str:
+def ctx_asset_type(info: dict) -> str:
     quote_type = (info.get("quoteType") or "").upper()
+
     if quote_type == "CRYPTOCURRENCY":
         return "Crypto"
+
     if quote_type == "ETF":
         return "ETF"
-    if quote_type == "EQUITY":
-        return "Stock"
+
     return "Stock"
 
 
-def calculate_trend(price: float, sma20: Optional[float], sma50: Optional[float], sma200: Optional[float]) -> str:
+def ctx_market_status(info: dict) -> str:
+    state = (info.get("marketState") or "").upper()
+
+    if state in ["REGULAR", "OPEN"]:
+        return "open"
+
+    if state in ["PRE", "PREMARKET"]:
+        return "premarket"
+
+    if state in ["POST", "POSTMARKET"]:
+        return "postmarket"
+
+    return "closed"
+
+
+def ctx_last_trading_session(hist) -> Optional[str]:
+    try:
+        if hist is None or hist.empty:
+            return None
+
+        last_index = hist.index[-1]
+        return last_index.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def ctx_rsi_status(rsi: Optional[float]) -> str:
+    if rsi is None:
+        return "Unavailable"
+    if rsi >= 70:
+        return "Overbought"
+    if rsi >= 60:
+        return "Bullish"
+    if rsi >= 45:
+        return "Neutral"
+    if rsi >= 30:
+        return "Weak"
+    return "Oversold"
+
+
+def ctx_volume_ratio(volume: int, avg_volume: Optional[int]) -> Optional[float]:
+    if not avg_volume or avg_volume == 0:
+        return None
+    return round(volume / avg_volume, 2)
+
+
+def ctx_volume_status(volume: int, avg_volume: Optional[int]) -> str:
+    ratio = ctx_volume_ratio(volume, avg_volume)
+
+    if ratio is None:
+        return "Average volume data not available"
+
+    if ratio >= 2.0:
+        return f"Very high volume ({ratio:.1f}x average)"
+
+    if ratio >= 1.3:
+        return f"Above average volume ({ratio:.1f}x average)"
+
+    if ratio >= 1.1:
+        return f"Slightly above average volume ({ratio:.1f}x average)"
+
+    if ratio >= 0.8:
+        return f"Normal volume ({ratio:.1f}x average)"
+
+    return f"Below average volume ({ratio:.1f}x average)"
+
+
+def ctx_trend(price: float, sma20: Optional[float], sma50: Optional[float], sma200: Optional[float]) -> str:
     above = []
     below = []
+
     if sma20:
         (above if price > sma20 else below).append("SMA20")
+
     if sma50:
         (above if price > sma50 else below).append("SMA50")
+
     if sma200:
         (above if price > sma200 else below).append("SMA200")
 
-    if not above and not below:
-        return "Insufficient data for trend analysis"
     if above and not below:
         return f"Price is above {', '.join(above)} — bullish structure"
+
     if below and not above:
         return f"Price is below {', '.join(below)} — bearish structure"
-    return f"Price is above {', '.join(above)} but below {', '.join(below)} — mixed trend"
+
+    if above and below:
+        return f"Price is above {', '.join(above)} but below {', '.join(below)} — mixed trend"
+
+    return "Insufficient data for trend analysis"
 
 
-def calculate_volume_status(volume: int, avg_volume: Optional[int]) -> str:
-    if not avg_volume or avg_volume == 0:
-        return "Average volume data not available"
-    ratio = volume / avg_volume
-    if ratio > 1.5:
-        return f"Above average volume ({ratio:.1f}x) — elevated activity"
-    if ratio < 0.7:
-        return f"Below average volume ({ratio:.1f}x) — low activity"
-    return f"Normal volume ({ratio:.1f}x average)"
+def ctx_momentum_status(price: float, sma20: Optional[float], rsi: Optional[float]) -> str:
+    if sma20 is None or rsi is None:
+        return "Unavailable"
+
+    distance_from_sma20 = ctx_percent_distance(price, sma20)
+
+    if rsi >= 70 and distance_from_sma20 is not None and distance_from_sma20 > 7:
+        return "Strong but extended"
+
+    if price > sma20 and rsi >= 60:
+        return "Bullish momentum"
+
+    if price > sma20:
+        return "Positive trend"
+
+    if price < sma20 and rsi < 45:
+        return "Weak momentum"
+
+    return "Neutral"
 
 
-def calculate_support_resistance(hist, current_price: float) -> tuple[list[float], list[float]]:
+def ctx_support_resistance(
+    hist,
+    price: float,
+    sma20: Optional[float],
+    sma50: Optional[float],
+    sma200: Optional[float],
+    high52w: Optional[float]
+) -> tuple[list[float], list[float]]:
+
     support = []
     resistance = []
+
+    def add_level(target: list[float], level: Optional[float]):
+        if level is None or level <= 0:
+            return
+
+        level = round(float(level), 2)
+
+        for existing in target:
+            if abs(existing - level) / level < 0.003:
+                return
+
+        target.append(level)
+
     try:
-        if hist is None or hist.empty:
-            return [], []
-        closes = hist["Close"].dropna()
-        if len(closes) < 20:
-            return [], []
+        if hist is not None and not hist.empty and len(hist) >= 20:
+            recent = hist.tail(60)
 
-        # Simple support/resistance from recent lows and highs
-        recent = closes.tail(60)
-        low_20  = safe_float(recent.tail(20).min())
-        low_60  = safe_float(recent.min())
-        high_20 = safe_float(recent.tail(20).max())
-        high_60 = safe_float(recent.max())
+            low_20 = safe_float(recent["Low"].tail(20).min())
+            low_60 = safe_float(recent["Low"].min())
+            high_20 = safe_float(recent["High"].tail(20).max())
+            high_60 = safe_float(recent["High"].max())
 
-        if low_20 and low_20 < current_price:
-            support.append(low_20)
-        if low_60 and low_60 < current_price and low_60 != low_20:
-            support.append(low_60)
+            for level in [low_20, low_60, sma20, sma50, sma200]:
+                if level and level < price:
+                    add_level(support, level)
 
-        if high_20 and high_20 > current_price:
-            resistance.append(high_20)
-        if high_60 and high_60 > current_price and high_60 != high_20:
-            resistance.append(high_60)
+            for level in [high_20, high_60, high52w]:
+                if level and level > price:
+                    add_level(resistance, level)
+
+        # Psychological levels every $5
+        if price >= 20:
+            below = round(price / 5) * 5
+            if below >= price:
+                below -= 5
+
+            above = below + 5
+
+            if below > 0:
+                add_level(support, below)
+
+            if above > price:
+                add_level(resistance, above)
 
     except Exception as e:
-        logger.warning(f"Support/resistance calculation failed: {e}")
+        logger.warning(f"Support/resistance failed: {e}")
 
-    return sorted(set(support), reverse=True)[:2], sorted(set(resistance))[:2]
+    support = sorted(support, reverse=True)[:4]
+    resistance = sorted(resistance)[:4]
+
+    return support, resistance
 
 
-def calculate_news_sentiment(headlines: list[str]) -> tuple[str, str]:
+def ctx_fundamental_summary(
+    market_cap: Optional[float],
+    pe_ratio: Optional[float],
+    revenue_growth: Optional[float],
+    profit_margins: Optional[float]
+) -> str:
+    parts = []
+
+    if market_cap:
+        if market_cap >= 200_000_000_000:
+            parts.append("mega-cap company")
+        elif market_cap >= 10_000_000_000:
+            parts.append("large-cap company")
+        else:
+            parts.append("smaller-cap company")
+
+    if revenue_growth is not None:
+        if revenue_growth >= 0.30:
+            parts.append("strong revenue growth")
+        elif revenue_growth >= 0.10:
+            parts.append("moderate revenue growth")
+        elif revenue_growth >= 0:
+            parts.append("low revenue growth")
+        else:
+            parts.append("negative revenue growth")
+
+    if profit_margins is not None:
+        if profit_margins >= 0.20:
+            parts.append("high profitability")
+        elif profit_margins >= 0.05:
+            parts.append("positive profitability")
+        else:
+            parts.append("weak profitability")
+
+    if pe_ratio is not None:
+        if pe_ratio >= 40:
+            parts.append("premium valuation")
+        elif pe_ratio >= 20:
+            parts.append("moderate-to-high valuation")
+        elif pe_ratio > 0:
+            parts.append("lower valuation")
+
+    if not parts:
+        return "Insufficient fundamental data."
+
+    return ", ".join(parts).capitalize() + "."
+
+
+def ctx_news_relevance(title: str, ticker: str, company_name: str) -> tuple[float, str]:
+    title_lower = title.lower()
+    ticker_lower = ticker.lower()
+
+    company_words = [
+        w.lower()
+        for w in company_name.replace(",", "").replace(".", "").split()
+        if len(w) > 3 and w.lower() not in ["inc", "corp", "corporation", "company", "class"]
+    ]
+
+    if ticker_lower in title_lower:
+        return 0.95, "asset"
+
+    for word in company_words:
+        if word in title_lower:
+            return 0.95, "asset"
+
+    sector_words = [
+        "ai", "artificial intelligence", "chip", "semiconductor", "gpu",
+        "data center", "datacenter", "tech", "nasdaq", "mag 7",
+        "magnificent seven", "earnings"
+    ]
+
+    macro_words = [
+        "fed", "powell", "inflation", "rates", "treasury", "yields",
+        "wall street", "market", "stocks", "s&p", "nasdaq"
+    ]
+
+    if any(word in title_lower for word in sector_words):
+        return 0.75, "sector"
+
+    if any(word in title_lower for word in macro_words):
+        return 0.60, "macro"
+
+    return 0.20, "irrelevant"
+
+
+def ctx_news_sentiment(headlines: list[str]) -> tuple[str, str]:
     if not headlines:
-        return "Neutral", "No recent news available"
+        return "Neutral", "No recent relevant news available"
 
-    positive_words = ["upgrade", "beat", "strong", "growth", "bullish", "buy", "surge", "rally", "record", "positive"]
+    positive_words = ["upgrade", "beat", "strong", "growth", "bullish", "buy", "surge", "rally", "record", "positive", "optimism"]
     negative_words = ["downgrade", "miss", "weak", "decline", "bearish", "sell", "drop", "fall", "concern", "risk", "warning"]
 
     pos_count = sum(1 for h in headlines for w in positive_words if w in h.lower())
@@ -386,177 +592,257 @@ def calculate_news_sentiment(headlines: list[str]) -> tuple[str, str]:
     else:
         sentiment = "Neutral"
 
-    catalyst = headlines[0] if headlines else "No major catalyst identified"
-    return sentiment, catalyst
+    return sentiment, headlines[0]
 
 
 @app.get("/context/{ticker}", response_model=MarketContextResponse)
 def get_market_context(ticker: str):
     ticker = ticker.upper().strip()
-
-    cached = get_cached_context(ticker)
-    if cached:
-        return cached
-
-    logger.info(f"Building market context for {ticker}")
     missing_data = []
+
+    logger.info(f"Building AI market context for {ticker}")
 
     try:
         stock = yf.Ticker(ticker)
-        info  = stock.info or {}
+        info = stock.info or {}
+        hist = stock.history(period="1y", interval="1d")
 
-        if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
+        if not info and (hist is None or hist.empty):
             raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
 
-        # --- Price Context ---
-        price = safe_float(info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose"))
+        company_name = info.get("longName") or info.get("shortName") or ticker
+        asset_type = ctx_asset_type(info)
+        market_status = ctx_market_status(info)
+        last_session = ctx_last_trading_session(hist)
+        price_as_of = f"{last_session} 16:00:00 ET" if last_session else None
+
+        # -------------------------
+        # Price
+        # -------------------------
+        price = safe_float(
+            info.get("regularMarketPrice")
+            or info.get("currentPrice")
+            or info.get("previousClose")
+        )
+
+        if price is None and hist is not None and not hist.empty:
+            price = safe_float(hist["Close"].dropna().iloc[-1])
+
         if price is None:
             raise HTTPException(status_code=404, detail=f"No price data for '{ticker}'")
 
-        prev_close  = safe_float(info.get("previousClose") or info.get("regularMarketPreviousClose"))
-        change_pct  = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
-        volume      = int(info.get("regularMarketVolume") or info.get("volume") or 0)
-        avg_volume  = int(info.get("averageVolume") or info.get("averageDailyVolume10Day") or 0) or None
-        high52w     = safe_float(info.get("fiftyTwoWeekHigh"))
-        low52w      = safe_float(info.get("fiftyTwoWeekLow"))
+        prev_close = safe_float(info.get("previousClose") or info.get("regularMarketPreviousClose"))
 
-        price_ctx = PriceContext(
+        if prev_close is None and hist is not None and not hist.empty:
+            closes = hist["Close"].dropna()
+            if len(closes) >= 2:
+                prev_close = safe_float(closes.iloc[-2])
+
+        change_pct = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
+
+        volume = int(info.get("regularMarketVolume") or info.get("volume") or 0)
+        avg_volume = int(info.get("averageVolume") or info.get("averageDailyVolume10Day") or 0) or None
+        volume_ratio = ctx_volume_ratio(volume, avg_volume)
+
+        high52w = safe_float(info.get("fiftyTwoWeekHigh"))
+        low52w = safe_float(info.get("fiftyTwoWeekLow"))
+        distance_52w_high = ctx_percent_distance(price, high52w)
+
+        if avg_volume is None:
+            missing_data.append("Average Volume")
+        if high52w is None:
+            missing_data.append("52-Week High")
+        if low52w is None:
+            missing_data.append("52-Week Low")
+
+        price_ctx = ContextPrice(
             currentPrice=price,
+            previousClose=prev_close,
             changePercent=change_pct,
             volume=volume,
             averageVolume=avg_volume,
+            volumeRatio=volume_ratio,
             fiftyTwoWeekHigh=high52w,
-            fiftyTwoWeekLow=low52w
+            fiftyTwoWeekLow=low52w,
+            distanceFrom52WeekHighPercent=distance_52w_high
         )
 
-        # --- Technical Context ---
-        hist = stock.history(period="1y", interval="1d")
-        rsi_val = sma20_val = sma50_val = sma200_val = None
+        # -------------------------
+        # Technical
+        # -------------------------
+        rsi_val = None
+        sma20_val = None
+        sma50_val = None
+        sma200_val = None
 
         if hist is not None and not hist.empty and len(hist) >= 14:
-            close = hist["Close"]
+            close = hist["Close"].dropna()
 
             try:
-                rsi_s = ta.rsi(close, length=14)
-                if rsi_s is not None and not rsi_s.empty:
-                    rsi_val = safe_float(rsi_s.iloc[-1])
-            except:
+                rsi_series = ta.rsi(close, length=14)
+                if rsi_series is not None and not rsi_series.empty:
+                    rsi_val = safe_float(rsi_series.iloc[-1])
+            except Exception:
                 missing_data.append("RSI")
 
             if len(close) >= 20:
-                try:
-                    sma20_s = ta.sma(close, length=20)
-                    if sma20_s is not None and not sma20_s.empty:
-                        sma20_val = safe_float(sma20_s.iloc[-1])
-                except:
-                    missing_data.append("SMA20")
+                sma20_val = safe_float(ta.sma(close, length=20).iloc[-1])
+            else:
+                missing_data.append("SMA20")
 
             if len(close) >= 50:
-                try:
-                    sma50_s = ta.sma(close, length=50)
-                    if sma50_s is not None and not sma50_s.empty:
-                        sma50_val = safe_float(sma50_s.iloc[-1])
-                except:
-                    missing_data.append("SMA50")
+                sma50_val = safe_float(ta.sma(close, length=50).iloc[-1])
+            else:
+                missing_data.append("SMA50")
 
             if len(close) >= 200:
-                try:
-                    sma200_s = ta.sma(close, length=200)
-                    if sma200_s is not None and not sma200_s.empty:
-                        sma200_val = safe_float(sma200_s.iloc[-1])
-                except:
-                    missing_data.append("SMA200")
+                sma200_val = safe_float(ta.sma(close, length=200).iloc[-1])
+            else:
+                missing_data.append("SMA200")
         else:
             missing_data.extend(["RSI", "SMA20", "SMA50", "SMA200"])
 
-        support, resistance = calculate_support_resistance(hist, price)
-        trend        = calculate_trend(price, sma20_val, sma50_val, sma200_val)
-        volume_status = calculate_volume_status(volume, avg_volume)
-
-        tech_ctx = TechnicalContext(
-            rsi=rsi_val,
+        support, resistance = ctx_support_resistance(
+            hist=hist,
+            price=price,
             sma20=sma20_val,
             sma50=sma50_val,
             sma200=sma200_val,
-            trend=trend,
-            volumeStatus=volume_status,
+            high52w=high52w
+        )
+
+        tech_ctx = ContextTechnical(
+            rsi=rsi_val,
+            rsiStatus=ctx_rsi_status(rsi_val),
+            sma20=sma20_val,
+            sma50=sma50_val,
+            sma200=sma200_val,
+            trend=ctx_trend(price, sma20_val, sma50_val, sma200_val),
+            momentumStatus=ctx_momentum_status(price, sma20_val, rsi_val),
+            volumeStatus=ctx_volume_status(volume, avg_volume),
             supportLevels=support,
             resistanceLevels=resistance
         )
 
-        # --- Fundamental Context ---
-        market_cap     = safe_float(info.get("marketCap"), 0)
-        pe_ratio       = safe_float(info.get("trailingPE") or info.get("forwardPE"))
-        eps            = safe_float(info.get("trailingEps") or info.get("forwardEps"))
+        # -------------------------
+        # Fundamentals
+        # -------------------------
+        market_cap = safe_float(info.get("marketCap"))
+        pe_ratio = safe_float(info.get("trailingPE") or info.get("forwardPE"))
+        eps = safe_float(info.get("trailingEps") or info.get("forwardEps"))
         revenue_growth = safe_float(info.get("revenueGrowth"))
         profit_margins = safe_float(info.get("profitMargins"))
         debt_to_equity = safe_float(info.get("debtToEquity"))
 
-        if pe_ratio is None:     missing_data.append("P/E Ratio")
-        if eps is None:          missing_data.append("EPS")
-        if revenue_growth is None: missing_data.append("Revenue Growth")
-        if profit_margins is None: missing_data.append("Profit Margins")
+        if market_cap is None:
+            missing_data.append("Market Cap")
+        if pe_ratio is None:
+            missing_data.append("P/E Ratio")
+        if eps is None:
+            missing_data.append("EPS")
+        if revenue_growth is None:
+            missing_data.append("Revenue Growth")
+        if profit_margins is None:
+            missing_data.append("Profit Margins")
+        if debt_to_equity is None:
+            missing_data.append("Debt To Equity")
 
-        fund_ctx = FundamentalContext(
+        fund_ctx = ContextFundamental(
             marketCap=market_cap,
             peRatio=pe_ratio,
             eps=eps,
             revenueGrowth=revenue_growth,
             profitMargins=profit_margins,
-            debtToEquity=debt_to_equity
+            debtToEquity=debt_to_equity,
+            fundamentalSummary=ctx_fundamental_summary(
+                market_cap,
+                pe_ratio,
+                revenue_growth,
+                profit_margins
+            )
         )
 
-        # --- News Context ---
-        headlines = []
-        news_items_raw = []
+        # -------------------------
+        # News
+        # -------------------------
+        raw_news = []
+
         try:
-            news_items_raw = stock.news or []
-            for item in news_items_raw[:5]:
-                title     = item.get("content", {}).get("title") or item.get("title", "")
-                publisher = item.get("content", {}).get("provider", {}).get("displayName") or item.get("publisher", "")
-                pub_date  = item.get("content", {}).get("pubDate") or item.get("providerPublishTime", "")
+            news_items = stock.news or []
+
+            for item in news_items[:10]:
+                content = item.get("content", {}) if isinstance(item, dict) else {}
+
+                title = content.get("title") or item.get("title", "")
+
+                publisher = (
+                    content.get("provider", {}).get("displayName")
+                    if isinstance(content.get("provider"), dict)
+                    else None
+                ) or item.get("publisher", "")
+
+                pub_date = content.get("pubDate") or item.get("providerPublishTime", "")
+
                 if isinstance(pub_date, int):
                     pub_date = datetime.utcfromtimestamp(pub_date).strftime("%Y-%m-%d")
+                else:
+                    pub_date = str(pub_date)[:10] if pub_date else None
+
                 if title:
-                    headlines.append(NewsItem(title=title, publisher=publisher, date=str(pub_date)[:10]))
+                    relevance, category = ctx_news_relevance(title, ticker, company_name)
+
+                    if relevance >= 0.55:
+                        raw_news.append(
+                            ContextNewsItem(
+                                title=title,
+                                publisher=publisher,
+                                date=pub_date,
+                                relevanceScore=relevance,
+                                category=category
+                            )
+                        )
+
         except Exception as e:
             logger.warning(f"News fetch failed for {ticker}: {e}")
             missing_data.append("Recent News")
 
-        headline_texts  = [h.title for h in headlines]
-        sentiment, catalyst = calculate_news_sentiment(headline_texts)
+        if not raw_news:
+            missing_data.append("Relevant News")
 
-        news_ctx = NewsContext(
+        headline_texts = [n.title for n in raw_news]
+        sentiment, catalyst = ctx_news_sentiment(headline_texts)
+
+        news_ctx = ContextNews(
             sentiment=sentiment,
             mainCatalyst=catalyst,
-            headlines=headlines
+            headlines=raw_news[:5]
         )
 
-        # --- Asset type & company name ---
-        asset_type   = detect_asset_type(info)
-        company_name = info.get("longName") or info.get("shortName") or ticker
-
-        result = MarketContextResponse(
+        return MarketContextResponse(
             ticker=ticker,
             companyName=company_name,
             assetType=asset_type,
             analysisDate=datetime.utcnow().strftime("%Y-%m-%d"),
+            marketStatus=market_status,
+            lastTradingSession=last_session,
+            priceAsOf=price_as_of,
             priceContext=price_ctx,
             technicalContext=tech_ctx,
             fundamentalContext=fund_ctx,
             newsContext=news_ctx,
-            missingData=missing_data,
+            missingData=list(sorted(set(missing_data))),
             cached_at=datetime.utcnow().isoformat()
         )
 
-        set_context_cache(ticker, result)
-        return result
-
     except HTTPException:
         raise
+
     except Exception as e:
         logger.error(f"Error building context for {ticker}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to build market context for '{ticker}': {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to build market context for '{ticker}': {str(e)}"
+        )
 
 @app.get("/search")
 def search_tickers(q: str):
