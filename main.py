@@ -1792,6 +1792,191 @@ def get_crypto():
         )
     }
 
+@app.get("/sectors")
+def get_sectors():
+    sectors = {
+        "technology": {
+            "symbol": "XLK",
+            "name": "Technology"
+        },
+        "financials": {
+            "symbol": "XLF",
+            "name": "Financials"
+        },
+        "energy": {
+            "symbol": "XLE",
+            "name": "Energy"
+        },
+        "healthcare": {
+            "symbol": "XLV",
+            "name": "Healthcare"
+        },
+        "consumer_discretionary": {
+            "symbol": "XLY",
+            "name": "Consumer Discretionary"
+        },
+        "consumer_staples": {
+            "symbol": "XLP",
+            "name": "Consumer Staples"
+        },
+        "industrials": {
+            "symbol": "XLI",
+            "name": "Industrials"
+        },
+        "communication_services": {
+            "symbol": "XLC",
+            "name": "Communication Services"
+        },
+        "utilities": {
+            "symbol": "XLU",
+            "name": "Utilities"
+        },
+        "materials": {
+            "symbol": "XLB",
+            "name": "Materials"
+        },
+        "real_estate": {
+            "symbol": "XLRE",
+            "name": "Real Estate"
+        }
+    }
+
+    items = {}
+
+    for key, sector in sectors.items():
+        symbol = sector["symbol"]
+
+        try:
+            ticker = yf.Ticker(symbol)
+
+            # Current / intraday price
+            intraday = ticker.history(period="2d", interval="5m")
+            daily = ticker.history(period="5d", interval="1d")
+            info = ticker.info or {}
+
+            current_price = None
+            reference_price = None
+
+            if intraday is not None and not intraday.empty:
+                closes_5m = intraday["Close"].dropna()
+                if len(closes_5m) > 0:
+                    current_price = float(closes_5m.iloc[-1])
+
+            if current_price is None:
+                current_price = safe_float(
+                    info.get("regularMarketPrice") or
+                    info.get("currentPrice")
+                )
+
+            # Previous close / reference price
+            reference_price = safe_float(
+                info.get("regularMarketPreviousClose") or
+                info.get("previousClose")
+            )
+
+            if reference_price is None and daily is not None and not daily.empty:
+                closes_daily = daily["Close"].dropna()
+
+                if len(closes_daily) >= 2:
+                    # Use previous daily close as reference
+                    reference_price = float(closes_daily.iloc[-2])
+                elif len(closes_daily) == 1:
+                    reference_price = float(closes_daily.iloc[0])
+
+            if current_price is None and daily is not None and not daily.empty:
+                closes_daily = daily["Close"].dropna()
+                if len(closes_daily) > 0:
+                    current_price = float(closes_daily.iloc[-1])
+
+            change = 0.0
+            change_pct = 0.0
+
+            if current_price is not None and reference_price is not None and reference_price != 0:
+                change = round(current_price - reference_price, 2)
+                change_pct = round((change / reference_price) * 100, 2)
+
+            trend = (
+                "up" if change_pct > 0.15 else
+                "down" if change_pct < -0.15 else
+                "neutral"
+            )
+
+            items[key] = {
+                "symbol": symbol,
+                "name": sector["name"],
+                "price": round(current_price, 2) if current_price is not None else None,
+                "reference_price": round(reference_price, 2) if reference_price is not None else None,
+                "change": change,
+                "change_pct": change_pct,
+                "trend": trend,
+                "change_source": "calculated"
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to get sector data for {symbol}: {e}")
+
+            items[key] = {
+                "symbol": symbol,
+                "name": sector["name"],
+                "price": None,
+                "reference_price": None,
+                "change": 0.0,
+                "change_pct": 0.0,
+                "trend": "neutral",
+                "change_source": "error"
+            }
+
+    ranked = sorted(
+        items.values(),
+        key=lambda x: x.get("change_pct", 0),
+        reverse=True
+    )
+
+    leaders = ranked[:3]
+    laggards = list(reversed(ranked[-3:]))
+
+    sector_tone = get_sector_tone(leaders, laggards)
+
+    return {
+        "items": items,
+        "leaders": leaders,
+        "laggards": laggards,
+        "sectorTone": sector_tone
+    }
+
+
+def get_sector_tone(leaders, laggards):
+    leader_names = [x["name"] for x in leaders]
+    laggard_names = [x["name"] for x in laggards]
+
+    defensive = {"Utilities", "Consumer Staples", "Healthcare", "Real Estate"}
+    growth = {"Technology", "Consumer Discretionary", "Communication Services"}
+    cyclicals = {"Financials", "Industrials", "Materials", "Energy"}
+
+    defensive_leaders = sum(1 for name in leader_names if name in defensive)
+    growth_leaders = sum(1 for name in leader_names if name in growth)
+    cyclical_leaders = sum(1 for name in leader_names if name in cyclicals)
+
+    growth_laggards = sum(1 for name in laggard_names if name in growth)
+    defensive_laggards = sum(1 for name in laggard_names if name in defensive)
+
+    if growth_leaders >= 2:
+        return "growth_led_risk_on"
+
+    if defensive_leaders >= 2 and growth_laggards >= 1:
+        return "defensive_rotation"
+
+    if cyclical_leaders >= 2:
+        return "cyclical_rotation"
+
+    if growth_laggards >= 2:
+        return "growth_under_pressure"
+
+    if defensive_laggards >= 2 and growth_leaders >= 1:
+        return "risk_on_rotation"
+
+    return "mixed_rotation"
+
 @app.get("/search")
 def search_tickers(q: str):
     q = q.strip().upper()
