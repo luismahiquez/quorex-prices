@@ -1169,9 +1169,7 @@ def get_trend(change_pct: float, threshold: float = 0.10):
 
 def get_latest_intraday_price(ticker: yf.Ticker):
     """
-    Gets the latest available intraday price.
-    This is better for overnight / premarket futures movement
-    than relying only on daily closes.
+    Latest available intraday price.
     """
     try:
         intraday = ticker.history(period="1d", interval="5m")
@@ -1188,42 +1186,9 @@ def get_latest_intraday_price(ticker: yf.Ticker):
     return None
 
 
-def get_previous_daily_close(ticker: yf.Ticker):
-    """
-    Gets the previous completed daily close.
-
-    If the last daily candle is today, use the candle before it.
-    Otherwise, use the latest available daily candle.
-    """
-    try:
-        hist = ticker.history(period="7d", interval="1d")
-
-        if hist is None or hist.empty:
-            return None
-
-        closes = hist["Close"].dropna()
-
-        if len(closes) == 0:
-            return None
-
-        today_et = datetime.now(ET).date()
-        last_index_date = closes.index[-1].date()
-
-        # If last daily candle is today, use previous completed close
-        if last_index_date == today_et and len(closes) >= 2:
-            return safe_float(closes.iloc[-2])
-
-        # Otherwise, latest daily close is the most recent completed close
-        return safe_float(closes.iloc[-1])
-
-    except Exception as e:
-        logger.warning(f"Failed to get previous daily close: {e}")
-        return None
-
-
 def get_info_price(ticker: yf.Ticker):
     """
-    Fallback price from ticker.info.
+    Fallback current price from ticker.info.
     """
     try:
         info = ticker.info or {}
@@ -1239,10 +1204,186 @@ def get_info_price(ticker: yf.Ticker):
         return None
 
 
+def get_value_from_obj(obj, key):
+    """
+    Safely read a key from dict-like or object-like yfinance structures.
+    """
+    try:
+        if hasattr(obj, "get"):
+            value = obj.get(key)
+            if value is not None:
+                return value
+    except Exception:
+        pass
+
+    try:
+        value = obj[key]
+        if value is not None:
+            return value
+    except Exception:
+        pass
+
+    try:
+        value = getattr(obj, key)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+
+    return None
+
+
+def get_previous_close_from_fast_info(ticker: yf.Ticker):
+    """
+    First attempt: yfinance fast_info.
+    """
+    try:
+        fast_info = ticker.fast_info
+
+        value = (
+            get_value_from_obj(fast_info, "previous_close")
+            or get_value_from_obj(fast_info, "regular_market_previous_close")
+            or get_value_from_obj(fast_info, "last_close")
+        )
+
+        return safe_float(value)
+
+    except Exception as e:
+        logger.warning(f"Failed to get previous close from fast_info: {e}")
+        return None
+
+
+def get_previous_close_from_info(ticker: yf.Ticker):
+    """
+    Second attempt: ticker.info.
+    """
+    try:
+        info = ticker.info or {}
+
+        value = (
+            info.get("regularMarketPreviousClose")
+            or info.get("previousClose")
+        )
+
+        return safe_float(value)
+
+    except Exception as e:
+        logger.warning(f"Failed to get previous close from info: {e}")
+        return None
+
+
+def get_previous_close_from_daily_history(ticker: yf.Ticker):
+    """
+    Third attempt: daily history.
+    Uses 1mo instead of 7d because futures sometimes return empty daily data
+    with short periods.
+    """
+    try:
+        hist = ticker.history(period="1mo", interval="1d")
+
+        if hist is None or hist.empty:
+            return None
+
+        closes = hist["Close"].dropna()
+
+        if len(closes) == 0:
+            return None
+
+        today_et = datetime.now(ET).date()
+        last_index_date = closes.index[-1].date()
+
+        # If the last daily candle is today, use previous completed candle.
+        if last_index_date == today_et and len(closes) >= 2:
+            return safe_float(closes.iloc[-2])
+
+        # Otherwise, use latest completed daily close.
+        return safe_float(closes.iloc[-1])
+
+    except Exception as e:
+        logger.warning(f"Failed to get previous close from daily history: {e}")
+        return None
+
+
+def get_futures_session_start_et(now_et: datetime):
+    """
+    Futures generally trade from 6:00 PM ET to 5:00 PM ET next day.
+    This gives us the current futures session start.
+    """
+    today_6pm = now_et.replace(hour=18, minute=0, second=0, microsecond=0)
+
+    if now_et >= today_6pm:
+        return today_6pm
+
+    return today_6pm - timedelta(days=1)
+
+
+def get_reference_from_intraday_before_session(ticker: yf.Ticker):
+    """
+    Final fallback:
+    Use intraday candles and pick the last close before the current futures session started.
+
+    Example:
+    Monday 12:09 AM ET -> current futures session started Sunday 6:00 PM ET.
+    Reference should be the last available close before Sunday 6:00 PM ET.
+    """
+    try:
+        now_et = datetime.now(ET)
+        session_start = get_futures_session_start_et(now_et)
+
+        hist = ticker.history(period="10d", interval="60m")
+
+        if hist is None or hist.empty:
+            return None
+
+        closes = hist["Close"].dropna()
+
+        if len(closes) == 0:
+            return None
+
+        # Ensure timezone is Eastern for comparison.
+        if closes.index.tz is None:
+            closes.index = closes.index.tz_localize("UTC").tz_convert("America/New_York")
+        else:
+            closes.index = closes.index.tz_convert("America/New_York")
+
+        before_session = closes[closes.index < session_start]
+
+        if len(before_session) == 0:
+            return None
+
+        return safe_float(before_session.iloc[-1])
+
+    except Exception as e:
+        logger.warning(f"Failed to get reference from intraday before session: {e}")
+        return None
+
+
+def get_reference_price(ticker: yf.Ticker):
+    """
+    Robust reference price resolver.
+    """
+    reference = get_previous_close_from_fast_info(ticker)
+    if reference is not None and reference > 0:
+        return reference
+
+    reference = get_previous_close_from_info(ticker)
+    if reference is not None and reference > 0:
+        return reference
+
+    reference = get_previous_close_from_daily_history(ticker)
+    if reference is not None and reference > 0:
+        return reference
+
+    reference = get_reference_from_intraday_before_session(ticker)
+    if reference is not None and reference > 0:
+        return reference
+
+    return None
+
+
 def normalize_tnx_value(value):
     """
-    Yahoo ^TNX often comes as 43.10 to represent 4.31%.
-    This normalizes it to the real yield percentage.
+    Yahoo ^TNX can come as 43.10 to represent 4.31%.
     """
     if value is None:
         return None
@@ -1274,16 +1415,6 @@ def build_market_item(
     threshold: float = 0.10,
     normalize_tnx: bool = False
 ):
-    """
-    Builds a market proxy item using:
-
-    current intraday price
-    vs
-    previous completed daily close
-
-    change_pct = ((current_price - reference_price) / reference_price) * 100
-    """
-
     ticker = yf.Ticker(symbol)
 
     current_price = get_latest_intraday_price(ticker)
@@ -1291,7 +1422,7 @@ def build_market_item(
     if current_price is None:
         current_price = get_info_price(ticker)
 
-    reference_price = get_previous_daily_close(ticker)
+    reference_price = get_reference_price(ticker)
 
     if normalize_tnx:
         current_price = normalize_tnx_value(current_price)
@@ -1299,6 +1430,7 @@ def build_market_item(
 
     change = 0.0
     change_pct = 0.0
+    change_source = "calculated"
 
     if (
         current_price is not None
@@ -1307,6 +1439,8 @@ def build_market_item(
     ):
         change = current_price - reference_price
         change_pct = round((change / reference_price) * 100, 2)
+    else:
+        change_source = "missing_reference"
 
     return {
         "symbol": symbol,
@@ -1315,7 +1449,7 @@ def build_market_item(
         "change": round(change, 2),
         "change_pct": change_pct,
         "trend": get_trend(change_pct, threshold),
-        "change_source": "calculated"
+        "change_source": change_source
     }
 
 
@@ -1369,8 +1503,6 @@ def get_macro():
         try:
             normalize_tnx = symbol == "^TNX"
 
-            # VIX and DXY can use a smaller threshold.
-            # TNX also uses a smaller threshold because yield movement matters even if small.
             if symbol == "^VIX":
                 threshold = 0.05
             elif symbol == "DX-Y.NYB":
