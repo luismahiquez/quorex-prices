@@ -1452,6 +1452,100 @@ def build_market_item(
         "change_source": change_source
     }
 
+def get_relative_strength(asset_change_pct, benchmark_change_pct):
+    """
+    Compares one asset against the S&P 500 futures change.
+    Used to know if Nasdaq, Dow, Russell are leading or lagging.
+    """
+    if asset_change_pct is None or benchmark_change_pct is None:
+        return "unknown"
+
+    diff = asset_change_pct - benchmark_change_pct
+
+    if diff >= 0.15:
+        return "leading"
+
+    if diff <= -0.15:
+        return "lagging"
+
+    return "in_line"
+
+def build_futures_structure(results):
+    """
+    Builds a simple market structure summary from futures data.
+    This helps the AI understand the market faster.
+    """
+
+    sp500 = results.get("sp500", {})
+    nasdaq = results.get("nasdaq", {})
+    dow = results.get("dow", {})
+    russell = results.get("russell", {})
+    oil = results.get("oil", {})
+    gold = results.get("gold", {})
+
+    sp500_change = sp500.get("change_pct", 0)
+    nasdaq_change = nasdaq.get("change_pct", 0)
+    dow_change = dow.get("change_pct", 0)
+    russell_change = russell.get("change_pct", 0)
+    oil_change = oil.get("change_pct", 0)
+    gold_change = gold.get("change_pct", 0)
+
+    positive_count = sum([
+        sp500_change > 0.10,
+        nasdaq_change > 0.10,
+        dow_change > 0.10,
+        russell_change > 0.10
+    ])
+
+    negative_count = sum([
+        sp500_change < -0.10,
+        nasdaq_change < -0.10,
+        dow_change < -0.10,
+        russell_change < -0.10
+    ])
+
+    if positive_count >= 3:
+        futures_tone = "bullish"
+    elif negative_count >= 3:
+        futures_tone = "bearish"
+    else:
+        futures_tone = "mixed"
+
+    tech_leadership = get_relative_strength(nasdaq_change, sp500_change)
+    small_caps_tone = "confirming" if russell_change > 0.10 else "weak" if russell_change < -0.10 else "neutral"
+
+    if oil_change < -0.50:
+        oil_tone = "down_supportive_for_inflation"
+    elif oil_change > 0.50:
+        oil_tone = "up_inflation_risk"
+    else:
+        oil_tone = "neutral"
+
+    if gold_change > 0.50:
+        gold_tone = "strong_defensive_bid"
+    elif gold_change < -0.50:
+        gold_tone = "weak"
+    else:
+        gold_tone = "neutral"
+
+    if futures_tone == "bullish" and oil_tone == "down_supportive_for_inflation":
+        overall_tone = "risk_on"
+    elif futures_tone == "bullish" and gold_tone == "strong_defensive_bid":
+        overall_tone = "risk_on_with_defensive_hedging"
+    elif futures_tone == "bearish":
+        overall_tone = "risk_off"
+    else:
+        overall_tone = "mixed"
+
+    return {
+        "futuresTone": futures_tone,
+        "techLeadership": tech_leadership,
+        "smallCapsTone": small_caps_tone,
+        "oilTone": oil_tone,
+        "goldTone": gold_tone,
+        "overallTone": overall_tone
+    }
+
 
 @app.get("/futures")
 def get_futures():
@@ -1486,7 +1580,23 @@ def get_futures():
                 "change_source": "error"
             }
 
-    return results
+    # Add relative strength vs S&P 500 futures
+    sp500_change = results.get("sp500", {}).get("change_pct", 0)
+
+    for key in ["nasdaq", "dow", "russell"]:
+        asset_change = results.get(key, {}).get("change_pct", 0)
+        results[key]["relative_strength_vs_sp500"] = get_relative_strength(
+            asset_change,
+            sp500_change
+        )
+
+    # Add market structure summary
+    market_structure = build_futures_structure(results)
+
+    return {
+        "items": results,
+        "marketStructure": market_structure
+    }
 
 
 @app.get("/macro")
