@@ -1150,6 +1150,262 @@ def get_market_context(ticker: str):
             detail=f"Failed to build market context for '{ticker}': {str(e)}"
         )
 
+def safe_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def get_trend(change_pct: float, threshold: float = 0.10):
+    if change_pct > threshold:
+        return "up"
+    if change_pct < -threshold:
+        return "down"
+    return "neutral"
+
+
+def get_latest_intraday_price(ticker: yf.Ticker):
+    """
+    Gets the latest available intraday price.
+    This is better for overnight / premarket futures movement
+    than relying only on daily closes.
+    """
+    try:
+        intraday = ticker.history(period="1d", interval="5m")
+
+        if intraday is not None and not intraday.empty:
+            closes = intraday["Close"].dropna()
+
+            if len(closes) > 0:
+                return safe_float(closes.iloc[-1])
+
+    except Exception as e:
+        logger.warning(f"Failed to get intraday price: {e}")
+
+    return None
+
+
+def get_previous_daily_close(ticker: yf.Ticker):
+    """
+    Gets the previous completed daily close.
+
+    If the last daily candle is today, use the candle before it.
+    Otherwise, use the latest available daily candle.
+    """
+    try:
+        hist = ticker.history(period="7d", interval="1d")
+
+        if hist is None or hist.empty:
+            return None
+
+        closes = hist["Close"].dropna()
+
+        if len(closes) == 0:
+            return None
+
+        today_et = datetime.now(ET).date()
+        last_index_date = closes.index[-1].date()
+
+        # If last daily candle is today, use previous completed close
+        if last_index_date == today_et and len(closes) >= 2:
+            return safe_float(closes.iloc[-2])
+
+        # Otherwise, latest daily close is the most recent completed close
+        return safe_float(closes.iloc[-1])
+
+    except Exception as e:
+        logger.warning(f"Failed to get previous daily close: {e}")
+        return None
+
+
+def get_info_price(ticker: yf.Ticker):
+    """
+    Fallback price from ticker.info.
+    """
+    try:
+        info = ticker.info or {}
+
+        return safe_float(
+            info.get("regularMarketPrice")
+            or info.get("currentPrice")
+            or info.get("previousClose")
+        )
+
+    except Exception as e:
+        logger.warning(f"Failed to get info price: {e}")
+        return None
+
+
+def normalize_tnx_value(value):
+    """
+    Yahoo ^TNX often comes as 43.10 to represent 4.31%.
+    This normalizes it to the real yield percentage.
+    """
+    if value is None:
+        return None
+
+    if value > 20:
+        return value / 10
+
+    return value
+
+
+def get_vix_level(price):
+    if price is None:
+        return "unknown"
+
+    if price < 15:
+        return "low"
+
+    if price < 20:
+        return "normal"
+
+    if price < 25:
+        return "elevated"
+
+    return "high"
+
+
+def build_market_item(
+    symbol: str,
+    threshold: float = 0.10,
+    normalize_tnx: bool = False
+):
+    """
+    Builds a market proxy item using:
+
+    current intraday price
+    vs
+    previous completed daily close
+
+    change_pct = ((current_price - reference_price) / reference_price) * 100
+    """
+
+    ticker = yf.Ticker(symbol)
+
+    current_price = get_latest_intraday_price(ticker)
+
+    if current_price is None:
+        current_price = get_info_price(ticker)
+
+    reference_price = get_previous_daily_close(ticker)
+
+    if normalize_tnx:
+        current_price = normalize_tnx_value(current_price)
+        reference_price = normalize_tnx_value(reference_price)
+
+    change = 0.0
+    change_pct = 0.0
+
+    if (
+        current_price is not None
+        and reference_price is not None
+        and reference_price != 0
+    ):
+        change = current_price - reference_price
+        change_pct = round((change / reference_price) * 100, 2)
+
+    return {
+        "symbol": symbol,
+        "price": round(current_price, 2) if current_price is not None else None,
+        "reference_price": round(reference_price, 2) if reference_price is not None else None,
+        "change": round(change, 2),
+        "change_pct": change_pct,
+        "trend": get_trend(change_pct, threshold),
+        "change_source": "calculated"
+    }
+
+
+@app.get("/futures")
+def get_futures():
+    symbols = {
+        "sp500": "ES=F",
+        "nasdaq": "NQ=F",
+        "dow": "YM=F",
+        "russell": "RTY=F",
+        "oil": "CL=F",
+        "gold": "GC=F"
+    }
+
+    results = {}
+
+    for name, symbol in symbols.items():
+        try:
+            results[name] = build_market_item(
+                symbol=symbol,
+                threshold=0.10
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to get futures for {symbol}: {e}")
+
+            results[name] = {
+                "symbol": symbol,
+                "price": None,
+                "reference_price": None,
+                "change": 0.0,
+                "change_pct": 0.0,
+                "trend": "neutral",
+                "change_source": "error"
+            }
+
+    return results
+
+
+@app.get("/macro")
+def get_macro():
+    symbols = {
+        "vix": "^VIX",
+        "tenYearYield": "^TNX",
+        "dollarIndex": "DX-Y.NYB"
+    }
+
+    results = {}
+
+    for name, symbol in symbols.items():
+        try:
+            normalize_tnx = symbol == "^TNX"
+
+            # VIX and DXY can use a smaller threshold.
+            # TNX also uses a smaller threshold because yield movement matters even if small.
+            if symbol == "^VIX":
+                threshold = 0.05
+            elif symbol == "DX-Y.NYB":
+                threshold = 0.05
+            elif symbol == "^TNX":
+                threshold = 0.02
+            else:
+                threshold = 0.10
+
+            item = build_market_item(
+                symbol=symbol,
+                threshold=threshold,
+                normalize_tnx=normalize_tnx
+            )
+
+            if symbol == "^VIX":
+                item["level"] = get_vix_level(item["price"])
+
+            results[name] = item
+
+        except Exception as e:
+            logger.warning(f"Failed to get macro for {symbol}: {e}")
+
+            results[name] = {
+                "symbol": symbol,
+                "price": None,
+                "reference_price": None,
+                "change": 0.0,
+                "change_pct": 0.0,
+                "trend": "neutral",
+                "change_source": "error"
+            }
+
+    return results
+
 @app.get("/search")
 def search_tickers(q: str):
     q = q.strip().upper()
