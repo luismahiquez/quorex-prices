@@ -1648,6 +1648,150 @@ def get_macro():
 
     return results
 
+from datetime import datetime, timedelta, timezone
+import yfinance as yf
+
+
+def get_crypto_trend(change_pct: float):
+    if change_pct > 1.0:
+        return "up"
+    if change_pct < -1.0:
+        return "down"
+    if change_pct > 0.25:
+        return "slightly_up"
+    if change_pct < -0.25:
+        return "slightly_down"
+    return "neutral"
+
+
+def get_crypto_risk_appetite(btc_change, eth_change, sol_change):
+    changes = [
+        btc_change if btc_change is not None else 0,
+        eth_change if eth_change is not None else 0,
+        sol_change if sol_change is not None else 0
+    ]
+
+    avg = sum(changes) / len(changes)
+
+    positive_count = sum(1 for x in changes if x > 0.5)
+    negative_count = sum(1 for x in changes if x < -0.5)
+
+    if avg >= 2.0 and positive_count >= 2:
+        return "strong"
+    if avg >= 0.5 and positive_count >= 2:
+        return "improving"
+    if avg <= -2.0 and negative_count >= 2:
+        return "risk-off"
+    if avg <= -0.5 and negative_count >= 2:
+        return "weakening"
+
+    return "neutral"
+
+
+def build_crypto_item(symbol: str):
+    ticker = yf.Ticker(symbol)
+
+    hist = ticker.history(period="2d", interval="5m")
+
+    if hist is None or hist.empty:
+        return {
+            "symbol": symbol,
+            "price": None,
+            "price_24h_ago": None,
+            "change": 0.0,
+            "change_pct_24h": 0.0,
+            "trend": "neutral",
+            "change_source": "missing_data"
+        }
+
+    closes = hist["Close"].dropna()
+
+    if len(closes) == 0:
+        return {
+            "symbol": symbol,
+            "price": None,
+            "price_24h_ago": None,
+            "change": 0.0,
+            "change_pct_24h": 0.0,
+            "trend": "neutral",
+            "change_source": "missing_data"
+        }
+
+    current_price = float(closes.iloc[-1])
+
+    now_utc = datetime.now(timezone.utc)
+    target_time = now_utc - timedelta(hours=24)
+
+    # Make index timezone-aware if needed
+    if closes.index.tz is None:
+        closes.index = closes.index.tz_localize("UTC")
+    else:
+        closes.index = closes.index.tz_convert("UTC")
+
+    before_or_at_24h = closes[closes.index <= target_time]
+
+    if len(before_or_at_24h) > 0:
+        price_24h_ago = float(before_or_at_24h.iloc[-1])
+    else:
+        # fallback: use oldest available close
+        price_24h_ago = float(closes.iloc[0])
+
+    change = current_price - price_24h_ago
+
+    if price_24h_ago != 0:
+        change_pct = round((change / price_24h_ago) * 100, 2)
+    else:
+        change_pct = 0.0
+
+    return {
+        "symbol": symbol,
+        "price": round(current_price, 2),
+        "price_24h_ago": round(price_24h_ago, 2),
+        "change": round(change, 2),
+        "change_pct_24h": change_pct,
+        "trend": get_crypto_trend(change_pct),
+        "change_source": "calculated_24h"
+    }
+
+
+@app.get("/crypto")
+def get_crypto():
+    symbols = {
+        "btc": "BTC-USD",
+        "eth": "ETH-USD",
+        "sol": "SOL-USD"
+    }
+
+    results = {}
+
+    for name, symbol in symbols.items():
+        try:
+            results[name] = build_crypto_item(symbol)
+        except Exception as e:
+            logger.warning(f"Failed to get crypto for {symbol}: {e}")
+            results[name] = {
+                "symbol": symbol,
+                "price": None,
+                "price_24h_ago": None,
+                "change": 0.0,
+                "change_pct_24h": 0.0,
+                "trend": "neutral",
+                "change_source": "error"
+            }
+
+    btc_change = results["btc"]["change_pct_24h"]
+    eth_change = results["eth"]["change_pct_24h"]
+    sol_change = results["sol"]["change_pct_24h"]
+
+    return {
+        "items": results,
+        "cryptoRiskAppetite": get_crypto_risk_appetite(
+            btc_change,
+            eth_change,
+            sol_change
+        )
+    }
+
 @app.get("/search")
 def search_tickers(q: str):
     q = q.strip().upper()
