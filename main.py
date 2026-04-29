@@ -1977,6 +1977,62 @@ def get_sector_tone(leaders, laggards):
 
     return "mixed_rotation"
 
+@app.get("/asset-profile/{ticker}")
+def get_asset_profile(ticker: str):
+    symbol = ticker.strip().upper()
+
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Ticker is required")
+
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info or {}
+
+        name = (
+            info.get("longName")
+            or info.get("shortName")
+            or info.get("displayName")
+            or symbol
+        )
+
+        quote_type = info.get("quoteType", "EQUITY")
+
+        sector = info.get("sector")
+        industry = info.get("industry")
+
+        # Fallbacks para assets que no tienen sector en Yahoo
+        if not sector:
+            if quote_type in ["ETF", "MUTUALFUND"]:
+                sector = "ETF"
+            elif quote_type in ["CRYPTOCURRENCY"]:
+                sector = "Crypto"
+            elif quote_type in ["INDEX"]:
+                sector = "Index"
+            elif quote_type in ["FUTURE"]:
+                sector = "Futures"
+            elif quote_type in ["CURRENCY"]:
+                sector = "Currency"
+            else:
+                sector = "Unknown"
+
+        return {
+            "ticker": symbol,
+            "name": name,
+            "exchange": info.get("exchange", ""),
+            "type": quote_type,
+            "sector": sector,
+            "industry": industry or "",
+            "currency": info.get("currency", ""),
+            "marketCap": info.get("marketCap")
+        }
+
+    except Exception as e:
+        logger.error(f"Asset profile error for '{symbol}': {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Asset profile failed: {str(e)}"
+        )
+
 @app.get("/search")
 def search_tickers(q: str):
     q = q.strip().upper()
