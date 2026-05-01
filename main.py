@@ -1,4 +1,5 @@
 import time
+import math
 import logging
 from datetime import datetime, date
 from typing import Optional
@@ -2033,6 +2034,28 @@ def get_asset_profile(ticker: str):
             detail=f"Asset profile failed: {str(e)}"
         )
 
+def safe_bool(value):
+    try:
+        if value is None or pd.isna(value):
+            return None
+
+        return bool(value)
+
+    except Exception:
+        return None
+
+def safe_int(value):
+    number = safe_number(value)
+
+    if number is None:
+        return 0
+
+    try:
+        return int(number)
+
+    except Exception:
+        return 0
+
 def safe_number(value):
     if value is None:
         return None
@@ -2044,55 +2067,129 @@ def safe_number(value):
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
             return None
 
+        if isinstance(value, (int, float)):
+            return float(value)
+
         return value
+
     except Exception:
-        return value
+        return None
 
 
 def clean_contract(row, option_type: str, expiration: str):
+    volume = safe_int(row.get("volume"))
+    open_interest = safe_int(row.get("openInterest"))
+
+    volume_to_open_interest = (
+        round(volume / open_interest, 2)
+        if open_interest > 0
+        else None
+    )
+
+    last_trade_date = row.get("lastTradeDate")
+    cleaned_last_trade_date = (
+        str(last_trade_date)
+        if safe_number(last_trade_date) is not None
+        else None
+    )
+
     return {
-        "contractSymbol": safe_number(row.get("contractSymbol")),
+        "contractSymbol": row.get("contractSymbol"),
         "optionType": option_type,
         "expiration": expiration,
+
         "strike": safe_number(row.get("strike")),
         "lastPrice": safe_number(row.get("lastPrice")),
         "bid": safe_number(row.get("bid")),
         "ask": safe_number(row.get("ask")),
         "change": safe_number(row.get("change")),
         "percentChange": safe_number(row.get("percentChange")),
-        "volume": safe_number(row.get("volume")) or 0,
-        "openInterest": safe_number(row.get("openInterest")) or 0,
+
+        "volume": volume,
+        "openInterest": open_interest,
+        "volumeToOpenInterest": volume_to_open_interest,
+
         "impliedVolatility": safe_number(row.get("impliedVolatility")),
-        "inTheMoney": safe_number(row.get("inTheMoney")),
-        "lastTradeDate": str(row.get("lastTradeDate")) if safe_number(row.get("lastTradeDate")) else None,
-        "contractSize": safe_number(row.get("contractSize")),
-        "currency": safe_number(row.get("currency")),
+        "inTheMoney": safe_bool(row.get("inTheMoney")),
+
+        "lastTradeDate": cleaned_last_trade_date,
+        "contractSize": row.get("contractSize"),
+        "currency": row.get("currency"),
     }
 
 
 def choose_swing_expiration(expirations: list[str]) -> str:
-    today = date.today()
+    if not expirations:
+        raise ValueError("No expirations available")
 
-    parsed = []
+    today = date.today()
+    candidates = []
+
     for exp in expirations:
         try:
             exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
             dte = (exp_date - today).days
-            parsed.append((exp, dte))
+
+            # mínimo 7 DTE para evitar ruido muy corto
+            if dte >= 7:
+                candidates.append((exp, dte))
+
         except Exception:
             continue
 
-    swing_expirations = [item for item in parsed if 14 <= item[1] <= 45]
+    # Preferencia swing trade: 14 a 45 DTE
+    swing_candidates = [
+        item for item in candidates
+        if 14 <= item[1] <= 45
+    ]
 
-    if swing_expirations:
-        return sorted(swing_expirations, key=lambda x: x[1])[0][0]
+    if swing_candidates:
+        return sorted(swing_candidates, key=lambda x: x[1])[0][0]
 
-    future_expirations = [item for item in parsed if item[1] > 0]
+    # Fallback: próxima expiración futura con al menos 7 DTE
+    if candidates:
+        return sorted(candidates, key=lambda x: x[1])[0][0]
 
-    if future_expirations:
-        return sorted(future_expirations, key=lambda x: x[1])[0][0]
-
+    # Último fallback
     return expirations[0]
+
+
+def get_underlying_price(ticker):
+    try:
+        fast_info = ticker.fast_info
+        price = fast_info.get("last_price")
+
+        if price is not None:
+            return round(float(price), 2)
+
+    except Exception:
+        pass
+
+    try:
+        info = ticker.info
+        price = (
+            info.get("regularMarketPrice")
+            or info.get("currentPrice")
+            or info.get("previousClose")
+        )
+
+        if price is not None:
+            return round(float(price), 2)
+
+    except Exception:
+        pass
+
+    return None
+
+def safe_column_sum(df, column_name: str) -> int:
+    try:
+        if column_name not in df.columns:
+            return 0
+
+        return int(df[column_name].fillna(0).sum())
+
+    except Exception:
+        return 0
 
 
 @app.get("/options/raw/{symbol}")
@@ -2104,6 +2201,7 @@ def get_options_raw(
 
     try:
         ticker = yf.Ticker(symbol)
+
         expirations = list(ticker.options)
 
         if not expirations:
@@ -2119,9 +2217,12 @@ def get_options_raw(
                 status_code=400,
                 detail={
                     "message": "Invalid expiration",
+                    "selectedExpiration": selected_expiration,
                     "availableExpirations": expirations
                 }
             )
+
+        underlying_price = get_underlying_price(ticker)
 
         chain = ticker.option_chain(selected_expiration)
 
@@ -2135,20 +2236,48 @@ def get_options_raw(
             for _, row in chain.puts.iterrows()
         ]
 
-        return {
+        expiration_date = datetime.strptime(
+            selected_expiration,
+            "%Y-%m-%d"
+        ).date()
+
+        days_to_expiration = (expiration_date - date.today()).days
+
+        response = {
             "symbol": symbol,
+            "underlyingPrice": underlying_price,
+
             "expiration": selected_expiration,
             "availableExpirations": expirations,
+            "daysToExpiration": days_to_expiration,
+
             "calls": calls,
             "puts": puts,
-            "source": "yfinance"
+
+            "totalCallVolume": safe_column_sum(chain.calls, "volume"),
+            "totalPutVolume": safe_column_sum(chain.puts, "volume"),
+            "totalCallOpenInterest": safe_column_sum(chain.calls, "openInterest"),
+            "totalPutOpenInterest": safe_column_sum(chain.puts, "openInterest"),
+
+            "source": "yfinance",
+            "timestamp": datetime.utcnow().isoformat()
         }
+
+        return response
 
     except HTTPException:
         raise
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Error fetching options chain",
+                "symbol": symbol,
+                "expiration": expiration,
+                "error": str(e)
+            }
+        )
 
 @app.get("/search")
 def search_tickers(q: str):
