@@ -2153,6 +2153,14 @@ def choose_swing_expiration(expirations: list[str]) -> str:
     # Último fallback
     return expirations[0]
 
+def count_valid_contracts(contracts):
+    return sum(
+        1 for c in contracts
+        if (c.get("bid") or 0) > 0
+        and (c.get("ask") or 0) > 0
+        and (c.get("openInterest") or 0) > 0
+        and (c.get("impliedVolatility") or 0) >= 0.05
+    )
 
 def get_underlying_price(ticker):
     try:
@@ -2236,6 +2244,15 @@ def get_options_raw(
             for _, row in chain.puts.iterrows()
         ]
 
+        valid_calls_count = count_valid_contracts(calls)
+        valid_puts_count = count_valid_contracts(puts)
+
+        data_quality = (
+            "Good"
+            if valid_calls_count >= 5 and valid_puts_count >= 5
+            else "Bad"
+        )
+
         expiration_date = datetime.strptime(
             selected_expiration,
             "%Y-%m-%d"
@@ -2258,6 +2275,10 @@ def get_options_raw(
             "totalPutVolume": safe_column_sum(chain.puts, "volume"),
             "totalCallOpenInterest": safe_column_sum(chain.calls, "openInterest"),
             "totalPutOpenInterest": safe_column_sum(chain.puts, "openInterest"),
+
+            "dataQuality": data_quality,
+            "validCallsCount": valid_calls_count,
+            "validPutsCount": valid_puts_count,
 
             "source": "yfinance",
             "timestamp": datetime.utcnow().isoformat()
