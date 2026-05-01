@@ -2033,6 +2033,123 @@ def get_asset_profile(ticker: str):
             detail=f"Asset profile failed: {str(e)}"
         )
 
+def safe_number(value):
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return None
+
+        return value
+    except Exception:
+        return value
+
+
+def clean_contract(row, option_type: str, expiration: str):
+    return {
+        "contractSymbol": safe_number(row.get("contractSymbol")),
+        "optionType": option_type,
+        "expiration": expiration,
+        "strike": safe_number(row.get("strike")),
+        "lastPrice": safe_number(row.get("lastPrice")),
+        "bid": safe_number(row.get("bid")),
+        "ask": safe_number(row.get("ask")),
+        "change": safe_number(row.get("change")),
+        "percentChange": safe_number(row.get("percentChange")),
+        "volume": safe_number(row.get("volume")) or 0,
+        "openInterest": safe_number(row.get("openInterest")) or 0,
+        "impliedVolatility": safe_number(row.get("impliedVolatility")),
+        "inTheMoney": safe_number(row.get("inTheMoney")),
+        "lastTradeDate": str(row.get("lastTradeDate")) if safe_number(row.get("lastTradeDate")) else None,
+        "contractSize": safe_number(row.get("contractSize")),
+        "currency": safe_number(row.get("currency")),
+    }
+
+
+def choose_swing_expiration(expirations: list[str]) -> str:
+    today = date.today()
+
+    parsed = []
+    for exp in expirations:
+        try:
+            exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+            parsed.append((exp, dte))
+        except Exception:
+            continue
+
+    swing_expirations = [item for item in parsed if 14 <= item[1] <= 45]
+
+    if swing_expirations:
+        return sorted(swing_expirations, key=lambda x: x[1])[0][0]
+
+    future_expirations = [item for item in parsed if item[1] > 0]
+
+    if future_expirations:
+        return sorted(future_expirations, key=lambda x: x[1])[0][0]
+
+    return expirations[0]
+
+
+@app.get("/options/raw/{symbol}")
+def get_options_raw(
+    symbol: str,
+    expiration: Optional[str] = Query(default=None)
+):
+    symbol = symbol.upper().strip()
+
+    try:
+        ticker = yf.Ticker(symbol)
+        expirations = list(ticker.options)
+
+        if not expirations:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No options expirations found for {symbol}"
+            )
+
+        selected_expiration = expiration or choose_swing_expiration(expirations)
+
+        if selected_expiration not in expirations:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Invalid expiration",
+                    "availableExpirations": expirations
+                }
+            )
+
+        chain = ticker.option_chain(selected_expiration)
+
+        calls = [
+            clean_contract(row, "CALL", selected_expiration)
+            for _, row in chain.calls.iterrows()
+        ]
+
+        puts = [
+            clean_contract(row, "PUT", selected_expiration)
+            for _, row in chain.puts.iterrows()
+        ]
+
+        return {
+            "symbol": symbol,
+            "expiration": selected_expiration,
+            "availableExpirations": expirations,
+            "calls": calls,
+            "puts": puts,
+            "source": "yfinance"
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/search")
 def search_tickers(q: str):
     q = q.strip().upper()
