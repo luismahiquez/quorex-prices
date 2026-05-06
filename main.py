@@ -1772,185 +1772,136 @@ def get_crypto_risk_appetite(btc_change, eth_change, sol_change):
 
     return "neutral"
 
-def build_crypto_items_from_coingecko():
-    url = "https://api.coingecko.com/api/v3/simple/price"
 
-    coin_map = {
-        "btc": {
-            "id": "bitcoin",
-            "display": "BTC-USD"
-        },
-        "eth": {
-            "id": "ethereum",
-            "display": "ETH-USD"
-        },
-        "sol": {
-            "id": "solana",
-            "display": "SOL-USD"
-        }
-    }
+def build_crypto_item(symbol: str):
+    ticker = yf.Ticker(symbol)
 
-    response = httpx.get(
-        url,
-        params={
-            "ids": ",".join([config["id"] for config in coin_map.values()]),
-            "vs_currencies": "usd",
-            "include_24hr_change": "true",
-            "include_last_updated_at": "true"
-        },
-        timeout=10.0
+    hist = ticker.history(
+        period="7d",
+        interval="15m",
+        auto_adjust=False
     )
 
-    response.raise_for_status()
-    data = response.json()
-
-    results = {}
-
-    now_utc = datetime.now(timezone.utc)
-
-    for name, config in coin_map.items():
-        coin_id = config["id"]
-        display_symbol = config["display"]
-
-        coin_data = data.get(coin_id, {})
-
-        price = coin_data.get("usd")
-        change_pct = coin_data.get("usd_24h_change")
-        last_updated_at = coin_data.get("last_updated_at")
-
-        if price is None or change_pct is None:
-            results[name] = {
-                "symbol": display_symbol,
-                "source_symbol": coin_id,
-                "price": None,
-                "price_24h_ago": None,
-                "change": 0.0,
-                "change_pct_24h": 0.0,
-                "trend": "neutral",
-                "change_source": "error",
-                "fetch_source": "coingecko_simple_price",
-                "latest_time": None,
-                "data_age_minutes": None,
-                "is_stale": True,
-                "error": "missing_price_or_24h_change"
-            }
-            continue
-
-        price = float(price)
-        change_pct = round(float(change_pct), 2)
-
-        # Si price = previous * (1 + pct/100)
-        # entonces previous = price / (1 + pct/100)
-        if change_pct != -100:
-            price_24h_ago = price / (1 + change_pct / 100)
-        else:
-            price_24h_ago = price
-
-        change = price - price_24h_ago
-
-        latest_time = None
-        data_age_minutes = None
-        is_stale = False
-
-        if last_updated_at:
-            latest_time = datetime.fromtimestamp(
-                int(last_updated_at),
-                tz=timezone.utc
-            )
-
-            data_age_minutes = round(
-                (now_utc - latest_time).total_seconds() / 60,
-                2
-            )
-
-            is_stale = data_age_minutes > 10
-
-        results[name] = {
-            "symbol": display_symbol,
-            "source_symbol": coin_id,
-            "price": round(price, 2),
-            "price_24h_ago": round(price_24h_ago, 2),
-            "change": round(change, 2),
-            "change_pct_24h": change_pct,
-            "trend": get_crypto_trend(change_pct),
-            "change_source": "coingecko_24h_change",
-            "fetch_source": "coingecko_simple_price",
-            "latest_time": latest_time.isoformat() if latest_time else None,
-            "data_age_minutes": data_age_minutes,
-            "is_stale": is_stale
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return {
+            "symbol": symbol,
+            "price": None,
+            "price_24h_ago": None,
+            "change": 0.0,
+            "change_pct_24h": 0.0,
+            "trend": "neutral",
+            "change_source": "missing_data"
         }
 
-    return results
+    closes = hist["Close"].dropna()
+
+    if len(closes) < 2:
+        return {
+            "symbol": symbol,
+            "price": None,
+            "price_24h_ago": None,
+            "change": 0.0,
+            "change_pct_24h": 0.0,
+            "trend": "neutral",
+            "change_source": "insufficient_data"
+        }
+
+    if closes.index.tz is None:
+        closes.index = closes.index.tz_localize("UTC")
+    else:
+        closes.index = closes.index.tz_convert("UTC")
+
+    current_price = float(closes.iloc[-1])
+
+    # Clave: usar el último candle disponible como referencia,
+    # no datetime.now(), porque Yahoo puede devolver data vieja.
+    latest_time = closes.index[-1]
+    target_time = latest_time - timedelta(hours=24)
+
+    before_or_at_24h = closes[closes.index <= target_time]
+
+    if len(before_or_at_24h) == 0:
+        return {
+            "symbol": symbol,
+            "price": round(current_price, 2),
+            "price_24h_ago": None,
+            "change": 0.0,
+            "change_pct_24h": 0.0,
+            "trend": "neutral",
+            "change_source": "no_24h_reference",
+            "latest_time": latest_time.isoformat(),
+            "reference_time_24h": None
+        }
+
+    price_24h_ago = float(before_or_at_24h.iloc[-1])
+    reference_time_24h = before_or_at_24h.index[-1]
+
+    change = current_price - price_24h_ago
+
+    if price_24h_ago != 0:
+        change_pct = round((change / price_24h_ago) * 100, 2)
+    else:
+        change_pct = 0.0
+
+    now_utc = datetime.now(timezone.utc)
+    data_age_minutes = round((now_utc - latest_time).total_seconds() / 60, 2)
+
+    return {
+        "symbol": symbol,
+        "price": round(current_price, 2),
+        "price_24h_ago": round(price_24h_ago, 2),
+        "change": round(change, 2),
+        "change_pct_24h": change_pct,
+        "trend": get_crypto_trend(change_pct),
+        "change_source": "calculated_24h",
+        "latest_time": latest_time.isoformat(),
+        "reference_time_24h": reference_time_24h.isoformat(),
+        "data_age_minutes": data_age_minutes,
+        "is_stale": data_age_minutes > 30
+    }
 
 @app.get("/crypto")
 def get_crypto():
-    try:
-        results = build_crypto_items_from_coingecko()
+    symbols = {
+        "btc": "BTC-USD",
+        "eth": "ETH-USD",
+        "sol": "SOL-USD"
+    }
 
-        for name, item in results.items():
+    results = {}
+
+    for name, symbol in symbols.items():
+        try:
+            results[name] = build_crypto_item(symbol)
+
             logger.info(
-                f"Crypto {item.get('source_symbol')}: "
-                f"price={item.get('price')} "
-                f"price_24h_ago={item.get('price_24h_ago')} "
-                f"change_pct_24h={item.get('change_pct_24h')} "
-                f"source={item.get('change_source')} "
-                f"latest_time={item.get('latest_time')} "
-                f"data_age_minutes={item.get('data_age_minutes')} "
-                f"is_stale={item.get('is_stale')}"
+                f"Crypto {symbol}: "
+                f"price={results[name].get('price')} "
+                f"price_24h_ago={results[name].get('price_24h_ago')} "
+                f"change_pct_24h={results[name].get('change_pct_24h')} "
+                f"source={results[name].get('change_source')} "
+                f"latest_time={results[name].get('latest_time')} "
+                f"reference_time_24h={results[name].get('reference_time_24h')} "
+                f"data_age_minutes={results[name].get('data_age_minutes')} "
+                f"is_stale={results[name].get('is_stale')}"
             )
 
-    except Exception as e:
-        error_message = str(e)
+        except Exception as e:
+            logger.warning(f"Failed to get crypto for {symbol}: {e}")
 
-        logger.warning(f"Failed to get crypto from CoinGecko: {error_message}")
-
-        results = {
-            "btc": {
-                "symbol": "BTC-USD",
-                "source_symbol": "bitcoin",
+            results[name] = {
+                "symbol": symbol,
                 "price": None,
                 "price_24h_ago": None,
                 "change": 0.0,
                 "change_pct_24h": 0.0,
                 "trend": "neutral",
                 "change_source": "error",
-                "fetch_source": "coingecko_simple_price",
                 "latest_time": None,
+                "reference_time_24h": None,
                 "data_age_minutes": None,
-                "is_stale": True,
-                "error": error_message
-            },
-            "eth": {
-                "symbol": "ETH-USD",
-                "source_symbol": "ethereum",
-                "price": None,
-                "price_24h_ago": None,
-                "change": 0.0,
-                "change_pct_24h": 0.0,
-                "trend": "neutral",
-                "change_source": "error",
-                "fetch_source": "coingecko_simple_price",
-                "latest_time": None,
-                "data_age_minutes": None,
-                "is_stale": True,
-                "error": error_message
-            },
-            "sol": {
-                "symbol": "SOL-USD",
-                "source_symbol": "solana",
-                "price": None,
-                "price_24h_ago": None,
-                "change": 0.0,
-                "change_pct_24h": 0.0,
-                "trend": "neutral",
-                "change_source": "error",
-                "fetch_source": "coingecko_simple_price",
-                "latest_time": None,
-                "data_age_minutes": None,
-                "is_stale": True,
-                "error": error_message
+                "is_stale": True
             }
-        }
 
     btc_change = results["btc"].get("change_pct_24h")
     eth_change = results["eth"].get("change_pct_24h")
@@ -1964,7 +1915,6 @@ def get_crypto():
             sol_change
         )
     }
-
 @app.get("/sectors")
 def get_sectors():
     sectors = {
