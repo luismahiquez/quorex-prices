@@ -1792,6 +1792,29 @@ def build__item_from_binance(display_symbol: str, binance_symbol: str):
         "is_stale": is_stale
     }
 
+def get_crypto_risk_appetite(btc_change, eth_change, sol_change):
+    changes = [
+        btc_change if btc_change is not None else 0,
+        eth_change if eth_change is not None else 0,
+        sol_change if sol_change is not None else 0
+    ]
+
+    avg = sum(changes) / len(changes)
+
+    positive_count = sum(1 for x in changes if x > 0.5)
+    negative_count = sum(1 for x in changes if x < -0.5)
+
+    if avg >= 2.0 and positive_count >= 2:
+        return "strong"
+    if avg >= 0.5 and positive_count >= 2:
+        return "improving"
+    if avg <= -2.0 and negative_count >= 2:
+        return "risk-off"
+    if avg <= -0.5 and negative_count >= 2:
+        return "weakening"
+
+    return "neutral"
+
 @app.get("/crypto")
 def get_crypto():
     symbols = {
