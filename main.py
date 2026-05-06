@@ -1833,22 +1833,27 @@ def get_crypto():
             )
 
         except Exception as e:
-            logger.warning(f"Failed to get crypto for {binance_symbol}: {e}")
-
-            results[name] = {
-                "symbol": display_symbol,
-                "source_symbol": binance_symbol,
-                "price": None,
-                "price_24h_ago": None,
-                "change": 0.0,
-                "change_pct_24h": 0.0,
-                "trend": "neutral",
-                "change_source": "error",
-                "fetch_source": "binance_spot",
-                "latest_time": None,
-                "data_age_minutes": None,
-                "is_stale": True
-            }
+        error_message = str(e)
+    
+        logger.warning(
+            f"Failed to get crypto for {binance_symbol}: {error_message}"
+        )
+    
+        results[name] = {
+            "symbol": display_symbol,
+            "source_symbol": binance_symbol,
+            "price": None,
+            "price_24h_ago": None,
+            "change": 0.0,
+            "change_pct_24h": 0.0,
+            "trend": "neutral",
+            "change_source": "error",
+            "fetch_source": "binance_spot",
+            "latest_time": None,
+            "data_age_minutes": None,
+            "is_stale": True,
+            "error": error_message
+        }
 
     btc_change = results["btc"].get("change_pct_24h")
     eth_change = results["eth"].get("change_pct_24h")
