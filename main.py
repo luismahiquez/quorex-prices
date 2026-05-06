@@ -1,7 +1,7 @@
 import time
 import math
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -309,8 +309,8 @@ def ctx_percent_distance(current: Optional[float], reference: Optional[float]) -
 def ctx_asset_type(info: dict) -> str:
     quote_type = (info.get("quoteType") or "").upper()
 
-    if quote_type == "CRYPTOCURRENCY":
-        return "Crypto"
+    if quote_type == "CURRENCY":
+        return ""
 
     if quote_type == "ETF":
         return "ETF"
@@ -674,7 +674,7 @@ def ctx_news_relevance(title: str, ticker: str, company_name: str) -> tuple[floa
         "energy",
         "oil",
         "banking",
-        "crypto",
+        "",
         "bitcoin",
         "biotech",
         "healthcare"
@@ -1648,10 +1648,6 @@ def get_macro():
             }
 
     return results
-
-from datetime import datetime, timedelta, timezone
-import yfinance as yf
-
 
 def get_crypto_trend(change_pct: float):
     if change_pct > 1.0:
