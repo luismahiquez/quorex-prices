@@ -1685,54 +1685,70 @@ def get_crypto_risk_appetite(btc_change, eth_change, sol_change):
     return "neutral"
 
 
+def empty_crypto_item(symbol: str, source: str):
+    return {
+        "symbol": symbol,
+        "price": None,
+        "price_24h_ago": None,
+        "change": 0.0,
+        "change_pct_24h": 0.0,
+        "trend": "neutral",
+        "change_source": source
+    }
+
+
 def build_crypto_item(symbol: str):
     ticker = yf.Ticker(symbol)
 
-    hist = ticker.history(period="2d", interval="5m")
+    # IMPORTANTE:
+    # Usamos 5d en vez de 2d porque 2d puede devolver data insuficiente.
+    # Con 5d + 5m tenemos margen para encontrar un candle cercano a hace 24h.
+    hist = ticker.history(
+        period="5d",
+        interval="5m",
+        auto_adjust=False
+    )
 
-    if hist is None or hist.empty:
-        return {
-            "symbol": symbol,
-            "price": None,
-            "price_24h_ago": None,
-            "change": 0.0,
-            "change_pct_24h": 0.0,
-            "trend": "neutral",
-            "change_source": "missing_data"
-        }
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return empty_crypto_item(symbol, "missing_data")
 
     closes = hist["Close"].dropna()
 
-    if len(closes) == 0:
-        return {
-            "symbol": symbol,
-            "price": None,
-            "price_24h_ago": None,
-            "change": 0.0,
-            "change_pct_24h": 0.0,
-            "trend": "neutral",
-            "change_source": "missing_data"
-        }
+    if len(closes) < 2:
+        return empty_crypto_item(symbol, "insufficient_data")
+
+    # Normalizar timezone a UTC
+    if closes.index.tz is None:
+        closes.index = closes.index.tz_localize("UTC")
+    else:
+        closes.index = closes.index.tz_convert("UTC")
 
     current_price = float(closes.iloc[-1])
 
     now_utc = datetime.now(timezone.utc)
     target_time = now_utc - timedelta(hours=24)
 
-    # Make index timezone-aware if needed
-    if closes.index.tz is None:
-        closes.index = closes.index.tz_localize("UTC")
-    else:
-        closes.index = closes.index.tz_convert("UTC")
+    # Buscar el candle más cercano a hace 24h
+    diffs = abs(closes.index - target_time)
+    nearest_pos = diffs.argmin()
+    nearest_time = closes.index[nearest_pos]
 
-    before_or_at_24h = closes[closes.index <= target_time]
+    # Si el candle más cercano está demasiado lejos, no calculamos un 24h falso
+    max_allowed_gap = timedelta(hours=2)
 
-    if len(before_or_at_24h) > 0:
-        price_24h_ago = float(before_or_at_24h.iloc[-1])
-    else:
-        # fallback: use oldest available close
-        price_24h_ago = float(closes.iloc[0])
+    if abs(nearest_time - target_time) > max_allowed_gap:
+        return {
+            "symbol": symbol,
+            "price": round(current_price, 2),
+            "price_24h_ago": None,
+            "change": 0.0,
+            "change_pct_24h": 0.0,
+            "trend": "neutral",
+            "change_source": "no_24h_reference",
+            "reference_time_24h": None
+        }
 
+    price_24h_ago = float(closes.iloc[nearest_pos])
     change = current_price - price_24h_ago
 
     if price_24h_ago != 0:
@@ -1747,7 +1763,8 @@ def build_crypto_item(symbol: str):
         "change": round(change, 2),
         "change_pct_24h": change_pct,
         "trend": get_crypto_trend(change_pct),
-        "change_source": "calculated_24h"
+        "change_source": "calculated_24h",
+        "reference_time_24h": nearest_time.isoformat()
     }
 
 
@@ -1764,8 +1781,19 @@ def get_crypto():
     for name, symbol in symbols.items():
         try:
             results[name] = build_crypto_item(symbol)
+
+            # Log útil para debug en Railway
+            logger.info(
+                f"Crypto {symbol}: "
+                f"price={results[name]['price']} "
+                f"price_24h_ago={results[name]['price_24h_ago']} "
+                f"change_pct_24h={results[name]['change_pct_24h']} "
+                f"source={results[name]['change_source']}"
+            )
+
         except Exception as e:
             logger.warning(f"Failed to get crypto for {symbol}: {e}")
+
             results[name] = {
                 "symbol": symbol,
                 "price": None,
@@ -1773,12 +1801,13 @@ def get_crypto():
                 "change": 0.0,
                 "change_pct_24h": 0.0,
                 "trend": "neutral",
-                "change_source": "error"
+                "change_source": "error",
+                "reference_time_24h": None
             }
 
-    btc_change = results["btc"]["change_pct_24h"]
-    eth_change = results["eth"]["change_pct_24h"]
-    sol_change = results["sol"]["change_pct_24h"]
+    btc_change = results["btc"].get("change_pct_24h")
+    eth_change = results["eth"].get("change_pct_24h")
+    sol_change = results["sol"].get("change_pct_24h")
 
     return {
         "items": results,
