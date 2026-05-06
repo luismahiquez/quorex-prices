@@ -10,6 +10,7 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import re
+import httpx
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1737,81 +1738,56 @@ def fetch_crypto_history(symbol: str):
 
     return hist, "yf_download"
 
+def build_crypto_item_from_binance(display_symbol: str, binance_symbol: str):
+    url = "https://api.binance.com/api/v3/ticker/24hr"
 
-def build_crypto_item(symbol: str):
-    hist, fetch_source = fetch_crypto_history(symbol)
+    response = httpx.get(
+        url,
+        params={"symbol": binance_symbol},
+        timeout=10.0
+    )
 
-    if hist is None or hist.empty:
-        return empty_crypto_item(symbol, "missing_data")
+    response.raise_for_status()
+    data = response.json()
 
-    # yf.download puede devolver columnas MultiIndex
-    if isinstance(hist.columns, pd.MultiIndex):
-        if ("Close", symbol) in hist.columns:
-            closes = hist[("Close", symbol)].dropna()
-        elif "Close" in hist.columns.get_level_values(0):
-            closes = hist["Close"].iloc[:, 0].dropna()
-        else:
-            return empty_crypto_item(symbol, "missing_close")
-    else:
-        if "Close" not in hist.columns:
-            return empty_crypto_item(symbol, "missing_close")
-        closes = hist["Close"].dropna()
+    current_price = float(data["lastPrice"])
+    change = float(data["priceChange"])
+    change_pct = round(float(data["priceChangePercent"]), 2)
 
-    if len(closes) < 2:
-        return empty_crypto_item(symbol, "insufficient_data")
+    price_24h_ago = current_price - change
 
-    if closes.index.tz is None:
-        closes.index = closes.index.tz_localize("UTC")
-    else:
-        closes.index = closes.index.tz_convert("UTC")
+    close_time_ms = data.get("closeTime")
+    close_time = None
 
-    current_price = float(closes.iloc[-1])
-
-    latest_time = closes.index[-1]
-    target_time = latest_time - timedelta(hours=24)
-
-    before_or_at_24h = closes[closes.index <= target_time]
-
-    if len(before_or_at_24h) == 0:
-        return {
-            "symbol": symbol,
-            "price": round(current_price, 2),
-            "price_24h_ago": None,
-            "change": 0.0,
-            "change_pct_24h": 0.0,
-            "trend": "neutral",
-            "change_source": "no_24h_reference",
-            "fetch_source": fetch_source,
-            "latest_time": latest_time.isoformat(),
-            "reference_time_24h": None
-        }
-
-    price_24h_ago = float(before_or_at_24h.iloc[-1])
-    reference_time_24h = before_or_at_24h.index[-1]
-
-    change = current_price - price_24h_ago
-
-    if price_24h_ago != 0:
-        change_pct = round((change / price_24h_ago) * 100, 2)
-    else:
-        change_pct = 0.0
+    if close_time_ms:
+        close_time = datetime.fromtimestamp(
+            close_time_ms / 1000,
+            tz=timezone.utc
+        )
 
     now_utc = datetime.now(timezone.utc)
-    data_age_minutes = round((now_utc - latest_time).total_seconds() / 60, 2)
 
-    is_stale = data_age_minutes > 30
+    data_age_minutes = None
+    is_stale = False
+
+    if close_time:
+        data_age_minutes = round(
+            (now_utc - close_time).total_seconds() / 60,
+            2
+        )
+        is_stale = data_age_minutes > 10
 
     return {
-        "symbol": symbol,
+        "symbol": display_symbol,
+        "source_symbol": binance_symbol,
         "price": round(current_price, 2),
         "price_24h_ago": round(price_24h_ago, 2),
         "change": round(change, 2),
         "change_pct_24h": change_pct,
         "trend": get_crypto_trend(change_pct),
-        "change_source": "calculated_24h",
-        "fetch_source": fetch_source,
-        "latest_time": latest_time.isoformat(),
-        "reference_time_24h": reference_time_24h.isoformat(),
+        "change_source": "binance_rolling_24h",
+        "fetch_source": "binance_spot",
+        "latest_time": close_time.isoformat() if close_time else None,
         "data_age_minutes": data_age_minutes,
         "is_stale": is_stale
     }
@@ -1819,42 +1795,59 @@ def build_crypto_item(symbol: str):
 @app.get("/crypto")
 def get_crypto():
     symbols = {
-        "btc": "BTC-USD",
-        "eth": "ETH-USD",
-        "sol": "SOL-USD"
+        "btc": {
+            "display": "BTC-USD",
+            "binance": "BTCUSDT"
+        },
+        "eth": {
+            "display": "ETH-USD",
+            "binance": "ETHUSDT"
+        },
+        "sol": {
+            "display": "SOL-USD",
+            "binance": "SOLUSDT"
+        }
     }
 
     results = {}
 
-    for name, symbol in symbols.items():
-        try:
-            results[name] = build_crypto_item(symbol)
+    for name, config in symbols.items():
+        display_symbol = config["display"]
+        binance_symbol = config["binance"]
 
-            # Log útil para debug en Railway
+        try:
+            results[name] = build_crypto_item_from_binance(
+                display_symbol=display_symbol,
+                binance_symbol=binance_symbol
+            )
+
             logger.info(
-                f"Crypto {symbol}: "
+                f"Crypto {binance_symbol}: "
                 f"price={results[name].get('price')} "
                 f"price_24h_ago={results[name].get('price_24h_ago')} "
                 f"change_pct_24h={results[name].get('change_pct_24h')} "
                 f"source={results[name].get('change_source')} "
                 f"latest_time={results[name].get('latest_time')} "
-                f"reference_time_24h={results[name].get('reference_time_24h')} "
                 f"data_age_minutes={results[name].get('data_age_minutes')} "
                 f"is_stale={results[name].get('is_stale')}"
             )
 
         except Exception as e:
-            logger.warning(f"Failed to get crypto for {symbol}: {e}")
+            logger.warning(f"Failed to get crypto for {binance_symbol}: {e}")
 
             results[name] = {
-                "symbol": symbol,
+                "symbol": display_symbol,
+                "source_symbol": binance_symbol,
                 "price": None,
                 "price_24h_ago": None,
                 "change": 0.0,
                 "change_pct_24h": 0.0,
                 "trend": "neutral",
                 "change_source": "error",
-                "reference_time_24h": None
+                "fetch_source": "binance_spot",
+                "latest_time": None,
+                "data_age_minutes": None,
+                "is_stale": True
             }
 
     btc_change = results["btc"].get("change_pct_24h")
