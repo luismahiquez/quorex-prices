@@ -1696,16 +1696,12 @@ def empty_crypto_item(symbol: str, source: str):
         "change_source": source
     }
 
-
 def build_crypto_item(symbol: str):
     ticker = yf.Ticker(symbol)
 
-    # IMPORTANTE:
-    # Usamos 5d en vez de 2d porque 2d puede devolver data insuficiente.
-    # Con 5d + 5m tenemos margen para encontrar un candle cercano a hace 24h.
     hist = ticker.history(
-        period="5d",
-        interval="5m",
+        period="7d",
+        interval="15m",
         auto_adjust=False
     )
 
@@ -1725,18 +1721,15 @@ def build_crypto_item(symbol: str):
 
     current_price = float(closes.iloc[-1])
 
-    now_utc = datetime.now(timezone.utc)
-    target_time = now_utc - timedelta(hours=24)
+    # IMPORTANTE:
+    # Usamos el último timestamp disponible de Yahoo como anchor,
+    # no datetime.now(), porque Yahoo/yfinance puede devolver data stale.
+    latest_time = closes.index[-1]
+    target_time = latest_time - timedelta(hours=24)
 
-    # Buscar el candle más cercano a hace 24h
-    diffs = abs(closes.index - target_time)
-    nearest_pos = diffs.argmin()
-    nearest_time = closes.index[nearest_pos]
+    before_or_at_24h = closes[closes.index <= target_time]
 
-    # Si el candle más cercano está demasiado lejos, no calculamos un 24h falso
-    max_allowed_gap = timedelta(hours=2)
-
-    if abs(nearest_time - target_time) > max_allowed_gap:
+    if len(before_or_at_24h) == 0:
         return {
             "symbol": symbol,
             "price": round(current_price, 2),
@@ -1745,16 +1738,22 @@ def build_crypto_item(symbol: str):
             "change_pct_24h": 0.0,
             "trend": "neutral",
             "change_source": "no_24h_reference",
+            "latest_time": latest_time.isoformat(),
             "reference_time_24h": None
         }
 
-    price_24h_ago = float(closes.iloc[nearest_pos])
+    price_24h_ago = float(before_or_at_24h.iloc[-1])
+    reference_time_24h = before_or_at_24h.index[-1]
+
     change = current_price - price_24h_ago
 
     if price_24h_ago != 0:
         change_pct = round((change / price_24h_ago) * 100, 2)
     else:
         change_pct = 0.0
+
+    now_utc = datetime.now(timezone.utc)
+    data_age_minutes = round((now_utc - latest_time).total_seconds() / 60, 2)
 
     return {
         "symbol": symbol,
@@ -1764,9 +1763,11 @@ def build_crypto_item(symbol: str):
         "change_pct_24h": change_pct,
         "trend": get_crypto_trend(change_pct),
         "change_source": "calculated_24h",
-        "reference_time_24h": nearest_time.isoformat()
+        "latest_time": latest_time.isoformat(),
+        "reference_time_24h": reference_time_24h.isoformat(),
+        "data_age_minutes": data_age_minutes,
+        "is_stale": data_age_minutes > 30
     }
-
 
 @app.get("/crypto")
 def get_crypto():
@@ -1785,10 +1786,14 @@ def get_crypto():
             # Log útil para debug en Railway
             logger.info(
                 f"Crypto {symbol}: "
-                f"price={results[name]['price']} "
-                f"price_24h_ago={results[name]['price_24h_ago']} "
-                f"change_pct_24h={results[name]['change_pct_24h']} "
-                f"source={results[name]['change_source']}"
+                f"price={results[name].get('price')} "
+                f"price_24h_ago={results[name].get('price_24h_ago')} "
+                f"change_pct_24h={results[name].get('change_pct_24h')} "
+                f"source={results[name].get('change_source')} "
+                f"latest_time={results[name].get('latest_time')} "
+                f"reference_time_24h={results[name].get('reference_time_24h')} "
+                f"data_age_minutes={results[name].get('data_age_minutes')} "
+                f"is_stale={results[name].get('is_stale')}"
             )
 
         except Exception as e:
