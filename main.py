@@ -1696,7 +1696,11 @@ def empty_crypto_item(symbol: str, source: str):
         "change_source": source
     }
 
-def build_crypto_item(symbol: str):
+def fetch_crypto_history(symbol: str):
+    """
+    Intenta primero con Ticker.history().
+    Si la data viene stale o insuficiente, intenta fallback con yf.download().
+    """
     ticker = yf.Ticker(symbol)
 
     hist = ticker.history(
@@ -1705,15 +1709,57 @@ def build_crypto_item(symbol: str):
         auto_adjust=False
     )
 
-    if hist is None or hist.empty or "Close" not in hist.columns:
+    if hist is not None and not hist.empty and "Close" in hist.columns:
+        closes = hist["Close"].dropna()
+
+        if len(closes) >= 2:
+            if closes.index.tz is None:
+                closes.index = closes.index.tz_localize("UTC")
+            else:
+                closes.index = closes.index.tz_convert("UTC")
+
+            latest_time = closes.index[-1]
+            now_utc = datetime.now(timezone.utc)
+            data_age_minutes = (now_utc - latest_time).total_seconds() / 60
+
+            if data_age_minutes <= 30:
+                return hist, "ticker_history"
+
+    # Fallback
+    hist = yf.download(
+        tickers=symbol,
+        period="7d",
+        interval="15m",
+        auto_adjust=False,
+        progress=False,
+        threads=False
+    )
+
+    return hist, "yf_download"
+
+
+def build_crypto_item(symbol: str):
+    hist, fetch_source = fetch_crypto_history(symbol)
+
+    if hist is None or hist.empty:
         return empty_crypto_item(symbol, "missing_data")
 
-    closes = hist["Close"].dropna()
+    # yf.download puede devolver columnas MultiIndex
+    if isinstance(hist.columns, pd.MultiIndex):
+        if ("Close", symbol) in hist.columns:
+            closes = hist[("Close", symbol)].dropna()
+        elif "Close" in hist.columns.get_level_values(0):
+            closes = hist["Close"].iloc[:, 0].dropna()
+        else:
+            return empty_crypto_item(symbol, "missing_close")
+    else:
+        if "Close" not in hist.columns:
+            return empty_crypto_item(symbol, "missing_close")
+        closes = hist["Close"].dropna()
 
     if len(closes) < 2:
         return empty_crypto_item(symbol, "insufficient_data")
 
-    # Normalizar timezone a UTC
     if closes.index.tz is None:
         closes.index = closes.index.tz_localize("UTC")
     else:
@@ -1721,9 +1767,6 @@ def build_crypto_item(symbol: str):
 
     current_price = float(closes.iloc[-1])
 
-    # IMPORTANTE:
-    # Usamos el último timestamp disponible de Yahoo como anchor,
-    # no datetime.now(), porque Yahoo/yfinance puede devolver data stale.
     latest_time = closes.index[-1]
     target_time = latest_time - timedelta(hours=24)
 
@@ -1738,6 +1781,7 @@ def build_crypto_item(symbol: str):
             "change_pct_24h": 0.0,
             "trend": "neutral",
             "change_source": "no_24h_reference",
+            "fetch_source": fetch_source,
             "latest_time": latest_time.isoformat(),
             "reference_time_24h": None
         }
@@ -1755,6 +1799,8 @@ def build_crypto_item(symbol: str):
     now_utc = datetime.now(timezone.utc)
     data_age_minutes = round((now_utc - latest_time).total_seconds() / 60, 2)
 
+    is_stale = data_age_minutes > 30
+
     return {
         "symbol": symbol,
         "price": round(current_price, 2),
@@ -1763,10 +1809,11 @@ def build_crypto_item(symbol: str):
         "change_pct_24h": change_pct,
         "trend": get_crypto_trend(change_pct),
         "change_source": "calculated_24h",
+        "fetch_source": fetch_source,
         "latest_time": latest_time.isoformat(),
         "reference_time_24h": reference_time_24h.isoformat(),
         "data_age_minutes": data_age_minutes,
-        "is_stale": data_age_minutes > 30
+        "is_stale": is_stale
     }
 
 @app.get("/crypto")
