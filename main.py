@@ -1650,7 +1650,7 @@ def get_macro():
 
     return results
 
-def get_crypto_trend(change_pct: float):
+def get__trend(change_pct: float):
     if change_pct > 1.0:
         return "up"
     if change_pct < -1.0:
@@ -1662,7 +1662,7 @@ def get_crypto_trend(change_pct: float):
     return "neutral"
 
 
-def get_crypto_risk_appetite(btc_change, eth_change, sol_change):
+def get__risk_appetite(btc_change, eth_change, sol_change):
     changes = [
         btc_change if btc_change is not None else 0,
         eth_change if eth_change is not None else 0,
@@ -1686,7 +1686,7 @@ def get_crypto_risk_appetite(btc_change, eth_change, sol_change):
     return "neutral"
 
 
-def empty_crypto_item(symbol: str, source: str):
+def empty__item(symbol: str, source: str):
     return {
         "symbol": symbol,
         "price": None,
@@ -1697,7 +1697,7 @@ def empty_crypto_item(symbol: str, source: str):
         "change_source": source
     }
 
-def fetch_crypto_history(symbol: str):
+def fetch__history(symbol: str):
     """
     Intenta primero con Ticker.history().
     Si la data viene stale o insuficiente, intenta fallback con yf.download().
@@ -1738,7 +1738,7 @@ def fetch_crypto_history(symbol: str):
 
     return hist, "yf_download"
 
-def build_crypto_item_from_binance(display_symbol: str, binance_symbol: str):
+def build__item_from_binance(display_symbol: str, binance_symbol: str):
     url = "https://api.binance.com/api/v3/ticker/24hr"
 
     response = httpx.get(
@@ -1784,7 +1784,7 @@ def build_crypto_item_from_binance(display_symbol: str, binance_symbol: str):
         "price_24h_ago": round(price_24h_ago, 2),
         "change": round(change, 2),
         "change_pct_24h": change_pct,
-        "trend": get_crypto_trend(change_pct),
+        "trend": get__trend(change_pct),
         "change_source": "binance_rolling_24h",
         "fetch_source": "binance_spot",
         "latest_time": close_time.isoformat() if close_time else None,
@@ -1833,27 +1833,27 @@ def get_crypto():
             )
 
         except Exception as e:
-        error_message = str(e)
-    
-        logger.warning(
-            f"Failed to get crypto for {binance_symbol}: {error_message}"
-        )
-    
-        results[name] = {
-            "symbol": display_symbol,
-            "source_symbol": binance_symbol,
-            "price": None,
-            "price_24h_ago": None,
-            "change": 0.0,
-            "change_pct_24h": 0.0,
-            "trend": "neutral",
-            "change_source": "error",
-            "fetch_source": "binance_spot",
-            "latest_time": None,
-            "data_age_minutes": None,
-            "is_stale": True,
-            "error": error_message
-        }
+            error_message = str(e)
+        
+            logger.warning(
+                f"Failed to get crypto for {binance_symbol}: {error_message}"
+            )
+        
+            results[name] = {
+                "symbol": display_symbol,
+                "source_symbol": binance_symbol,
+                "price": None,
+                "price_24h_ago": None,
+                "change": 0.0,
+                "change_pct_24h": 0.0,
+                "trend": "neutral",
+                "change_source": "error",
+                "fetch_source": "binance_spot",
+                "latest_time": None,
+                "data_age_minutes": None,
+                "is_stale": True,
+                "error": error_message
+            }
 
     btc_change = results["btc"].get("change_pct_24h")
     eth_change = results["eth"].get("change_pct_24h")
