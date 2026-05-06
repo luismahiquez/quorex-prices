@@ -1815,6 +1815,60 @@ def get_crypto_risk_appetite(btc_change, eth_change, sol_change):
 
     return "neutral"
 
+def build_crypto_item_from_binance(display_symbol: str, binance_symbol: str):
+    url = "https://api.binance.com/api/v3/ticker/24hr"
+
+    response = httpx.get(
+        url,
+        params={"symbol": binance_symbol},
+        timeout=10.0
+    )
+
+    response.raise_for_status()
+    data = response.json()
+
+    current_price = float(data["lastPrice"])
+    change = float(data["priceChange"])
+    change_pct = round(float(data["priceChangePercent"]), 2)
+
+    price_24h_ago = current_price - change
+
+    close_time_ms = data.get("closeTime")
+    close_time = None
+
+    if close_time_ms:
+        close_time = datetime.fromtimestamp(
+            close_time_ms / 1000,
+            tz=timezone.utc
+        )
+
+    now_utc = datetime.now(timezone.utc)
+
+    data_age_minutes = None
+    is_stale = False
+
+    if close_time:
+        data_age_minutes = round(
+            (now_utc - close_time).total_seconds() / 60,
+            2
+        )
+        is_stale = data_age_minutes > 10
+
+    return {
+        "symbol": display_symbol,
+        "source_symbol": binance_symbol,
+        "price": round(current_price, 2),
+        "price_24h_ago": round(price_24h_ago, 2),
+        "change": round(change, 2),
+        "change_pct_24h": change_pct,
+        "trend": get_crypto_trend(change_pct),
+        "change_source": "binance_rolling_24h",
+        "fetch_source": "binance_spot",
+        "latest_time": close_time.isoformat() if close_time else None,
+        "data_age_minutes": data_age_minutes,
+        "is_stale": is_stale
+    }
+
 @app.get("/crypto")
 def get_crypto():
     symbols = {
