@@ -2479,6 +2479,155 @@ def ctx_unusual_volume_ratio(df) -> float:
     except Exception:
         return 0.0
 
+def ctx_calculate_iv_rank(ticker_obj, calls_df, puts_df, price: float) -> Optional[float]:
+    """
+    IV Rank estimate.
+    yfinance no expone IV histórica real.
+    Proxy: IV ATM actual vs rango de realized volatility 30D del último año.
+    """
+    try:
+        atm_calls = calls_df.iloc[(calls_df["strike"] - price).abs().argsort()[:3]]
+        atm_puts = puts_df.iloc[(puts_df["strike"] - price).abs().argsort()[:3]]
+
+        iv_values = (
+            atm_calls["impliedVolatility"].dropna().tolist() +
+            atm_puts["impliedVolatility"].dropna().tolist()
+        )
+
+        if not iv_values:
+            return None
+
+        current_iv = sum(iv_values) / len(iv_values)
+
+        hist = ticker_obj.history(period="1y", interval="1d")
+
+        if hist is None or hist.empty or len(hist) < 30:
+            return None
+
+        returns = hist["Close"].pct_change().dropna()
+        rolling_vol = returns.rolling(30).std() * (252 ** 0.5)
+        rolling_vol = rolling_vol.dropna()
+
+        if rolling_vol.empty:
+            return None
+
+        iv_low = float(rolling_vol.min())
+        iv_high = float(rolling_vol.max())
+
+        if iv_high == iv_low:
+            return 50.0
+
+        iv_rank = ((current_iv - iv_low) / (iv_high - iv_low)) * 100
+
+        return round(max(0, min(100, iv_rank)), 1)
+
+    except Exception:
+        return None
+
+
+def ctx_calculate_skew(calls_df, puts_df, price: float) -> tuple[Optional[float], str]:
+    try:
+        otm_calls = calls_df[
+            calls_df["strike"] > price * 1.02
+        ]["impliedVolatility"].dropna()
+
+        otm_puts = puts_df[
+            puts_df["strike"] < price * 0.98
+        ]["impliedVolatility"].dropna()
+
+        if len(otm_calls) == 0 or len(otm_puts) == 0:
+            return None, "UNAVAILABLE"
+
+        avg_puts_iv = float(otm_puts.mean())
+        avg_calls_iv = float(otm_calls.mean())
+
+        skew = round((avg_puts_iv - avg_calls_iv) * 100, 1)
+
+        if skew > 15:
+            return skew, "HIGH_SKEW"
+
+        if skew < -15:
+            return skew, "INVERTED"
+
+        return skew, "NORMAL"
+
+    except Exception:
+        return None, "UNAVAILABLE"
+
+
+def ctx_atm_delta_estimate(calls_df, price: float) -> Optional[float]:
+    try:
+        atm = calls_df.iloc[(calls_df["strike"] - price).abs().argsort()[:1]]
+
+        if "delta" in calls_df.columns:
+            return safe_float(atm["delta"].iloc[0])
+
+        strike = float(atm["strike"].iloc[0])
+        dist_pct = abs(strike - price) / price
+
+        if dist_pct < 0.02:
+            return 0.50
+
+        return None
+
+    except Exception:
+        return None
+
+
+def ctx_liquidity_score(calls_df, puts_df) -> float:
+    score = 0.0
+
+    try:
+        max_oi = max(
+            calls_df["openInterest"].fillna(0).max(),
+            puts_df["openInterest"].fillna(0).max()
+        )
+
+        if max_oi > 5000:
+            score += 3
+
+        valid_spreads = []
+
+        for df in [calls_df, puts_df]:
+            for _, row in df.iterrows():
+                bid = row.get("bid") or 0
+                ask = row.get("ask") or 0
+                mid = (bid + ask) / 2
+
+                if mid > 0 and ask >= bid:
+                    spread_pct = (ask - bid) / mid
+                    valid_spreads.append(spread_pct)
+
+        if valid_spreads:
+            avg_spread = sum(valid_spreads) / len(valid_spreads)
+
+            if avg_spread < 0.05:
+                score += 3
+            elif avg_spread < 0.10:
+                score += 1.5
+
+        total_vol = (
+            safe_column_sum(calls_df, "volume") +
+            safe_column_sum(puts_df, "volume")
+        )
+
+        if total_vol > 1000:
+            score += 2
+        elif total_vol > 500:
+            score += 1
+
+        total_strikes = len(calls_df) + len(puts_df)
+
+        if total_strikes > 40:
+            score += 2
+        elif total_strikes > 20:
+            score += 1
+
+    except Exception:
+        pass
+
+    return round(min(10.0, score), 1)
+
 
 @app.get("/options/raw/{symbol}")
 def get_options_raw(
