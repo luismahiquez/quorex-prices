@@ -268,6 +268,11 @@ class ContextFundamental(BaseModel):
     revenueGrowth: Optional[float]
     profitMargins: Optional[float]
     debtToEquity: Optional[float]
+
+    earningsDate: Optional[str] = None
+    daysToEarnings: Optional[int] = None
+    earningsFlag: str = "CLEAR"
+
     fundamentalSummary: str
 
 class ContextOptions(BaseModel):
@@ -315,6 +320,7 @@ class MarketContextResponse(BaseModel):
     ticker: str
     companyName: str
     assetType: str
+    sectorEtf: Optional[str] = None
     analysisDate: str
     marketStatus: str
     lastTradingSession: Optional[str]
@@ -643,6 +649,72 @@ def ctx_fundamental_summary(
 
     return ", ".join(parts).capitalize() + "."
 
+SECTOR_ETF_MAP = {
+    "Technology": "XLK",
+
+    "Financial Services": "XLF",
+    "Financials": "XLF",
+
+    "Energy": "XLE",
+
+    "Healthcare": "XLV",
+    "Health Care": "XLV",
+
+    "Consumer Cyclical": "XLY",
+    "Consumer Discretionary": "XLY",
+
+    "Consumer Defensive": "XLP",
+    "Consumer Staples": "XLP",
+
+    "Industrials": "XLI",
+
+    "Communication Services": "XLC",
+
+    "Utilities": "XLU",
+
+    "Basic Materials": "XLB",
+    "Materials": "XLB",
+
+    "Real Estate": "XLRE",
+}
+
+
+def ctx_earnings_info(info: dict) -> tuple[Optional[str], Optional[int], str]:
+    try:
+        earnings_ts = (
+            info.get("earningsTimestamp")
+            or info.get("earningsTimestampStart")
+        )
+
+        if earnings_ts:
+            earnings_dt = datetime.fromtimestamp(
+                int(earnings_ts),
+                timezone.utc
+            ).date()
+
+            days = (earnings_dt - date.today()).days
+
+            if days < 0:
+                return str(earnings_dt), days, "CLEAR"
+
+            if days <= 3:
+                return str(earnings_dt), days, "EARNINGS_INMINENTES"
+
+            if days <= 7:
+                return str(earnings_dt), days, "EARNINGS_PROXIMOS"
+
+            return str(earnings_dt), days, "CLEAR"
+
+    except Exception:
+        pass
+
+    return None, None, "CLEAR"
+
+
+def ctx_sector_etf(info: dict) -> Optional[str]:
+    sector = info.get("sector", "")
+    return SECTOR_ETF_MAP.get(sector)
+
 
 # ============================================================
 # News helpers
@@ -885,6 +957,7 @@ def get_market_context(ticker: str):
 
         company_name = info.get("longName") or info.get("shortName") or ticker
         asset_type = ctx_asset_type(info)
+        sector_etf = ctx_sector_etf(info)
         market_status = ctx_market_status(info)
         last_session = ctx_last_trading_session(hist)
         price_as_of = f"{last_session} 16:00:00 ET" if last_session else None
@@ -1064,6 +1137,8 @@ def get_market_context(ticker: str):
         if debt_to_equity is None:
             missing_data.append("Debt To Equity")
 
+        earnings_date, days_to_earnings, earnings_flag = ctx_earnings_info(info)
+
         fund_ctx = ContextFundamental(
             marketCap=market_cap,
             peRatio=pe_ratio,
@@ -1071,6 +1146,9 @@ def get_market_context(ticker: str):
             revenueGrowth=revenue_growth,
             profitMargins=profit_margins,
             debtToEquity=debt_to_equity,
+            earningsDate=earnings_date,
+            daysToEarnings=days_to_earnings,
+            earningsFlag=earnings_flag,
             fundamentalSummary=ctx_fundamental_summary(
                 market_cap,
                 pe_ratio,
@@ -1228,6 +1306,7 @@ def get_market_context(ticker: str):
             ticker=ticker,
             companyName=company_name,
             assetType=asset_type,
+            sectorEtf=sector_etf,
             analysisDate=datetime.utcnow().strftime("%Y-%m-%d"),
             marketStatus=market_status,
             lastTradingSession=last_session,
