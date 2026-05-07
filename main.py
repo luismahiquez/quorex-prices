@@ -2642,7 +2642,7 @@ def ctx_atm_delta_estimate(calls_df, price: float) -> Optional[float]:
         return None
 
 
-def ctx_liquidity_score(calls_df, puts_df) -> float:
+def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
     score = 0.0
 
     try:
@@ -2657,14 +2657,19 @@ def ctx_liquidity_score(calls_df, puts_df) -> float:
         valid_spreads = []
 
         for df in [calls_df, puts_df]:
-            for _, row in df.iterrows():
+            near_money = df[
+                (df["strike"] >= price * 0.80) &
+                (df["strike"] <= price * 1.20)
+            ].copy()
+        
+            for _, row in near_money.iterrows():
                 bid = row.get("bid") or 0
                 ask = row.get("ask") or 0
                 mid = (bid + ask) / 2
 
-                if mid > 0 and ask >= bid:
-                    spread_pct = (ask - bid) / mid
-                    valid_spreads.append(spread_pct)
+        if mid > 0 and ask >= bid:
+            spread_pct = (ask - bid) / mid
+            valid_spreads.append(spread_pct)
 
         if valid_spreads:
             avg_spread = sum(valid_spreads) / len(valid_spreads)
@@ -2769,7 +2774,7 @@ def ctx_options_context(
 
         atm_delta = ctx_atm_delta_estimate(calls_df, price)
 
-        liq_score = ctx_liquidity_score(calls_df, puts_df)
+        liq_score = ctx_liquidity_score(calls_df, puts_df, price)
 
         return ContextOptions(
             expiration=exp,
