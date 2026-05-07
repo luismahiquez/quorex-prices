@@ -270,6 +270,32 @@ class ContextFundamental(BaseModel):
     debtToEquity: Optional[float]
     fundamentalSummary: str
 
+class ContextOptions(BaseModel):
+    expiration: Optional[str] = None
+    daysToExpiration: Optional[int] = None
+
+    ivRank: Optional[float] = None
+    ivRankStatus: str = "UNAVAILABLE"
+    ivProxyMethod: Optional[str] = None
+
+    putCallVolumeRatio: Optional[float] = None
+    putCallOIRatio: Optional[float] = None
+
+    maxPain: Optional[float] = None
+    maxPainDistancePct: Optional[float] = None
+
+    skew: Optional[float] = None
+    skewStatus: str = "UNAVAILABLE"
+
+    unusualCallVolume: bool = False
+    unusualPutVolume: bool = False
+    unusualCallVolumeRatio: Optional[float] = None
+    unusualPutVolumeRatio: Optional[float] = None
+
+    atmDeltaEstimate: Optional[float] = None
+    liquidityScore: Optional[float] = None
+    dataQuality: str = "UNAVAILABLE"
+
 
 class ContextNewsItem(BaseModel):
     title: str
@@ -299,6 +325,7 @@ class MarketContextResponse(BaseModel):
     newsContext: ContextNews
     missingData: list[str]
     cached_at: Optional[str] = None
+    optionsContext: Optional[ContextOptions] = None
 
 
 # ============================================================
