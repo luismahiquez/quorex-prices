@@ -2422,10 +2422,19 @@ def safe_column_sum(df, column_name: str) -> int:
 
 def ctx_calculate_max_pain(calls_df, puts_df) -> Optional[float]:
     try:
-        all_strikes = set(
-            calls_df["strike"].dropna().tolist() +
-            puts_df["strike"].dropna().tolist()
-        )
+        calls = calls_df[["strike", "openInterest"]].copy()
+        puts = puts_df[["strike", "openInterest"]].copy()
+
+        calls["strike"] = pd.to_numeric(calls["strike"], errors="coerce")
+        calls["openInterest"] = pd.to_numeric(calls["openInterest"], errors="coerce").fillna(0)
+
+        puts["strike"] = pd.to_numeric(puts["strike"], errors="coerce")
+        puts["openInterest"] = pd.to_numeric(puts["openInterest"], errors="coerce").fillna(0)
+
+        calls = calls.dropna(subset=["strike"])
+        puts = puts.dropna(subset=["strike"])
+
+        all_strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
 
         if not all_strikes:
             return None
@@ -2433,18 +2442,16 @@ def ctx_calculate_max_pain(calls_df, puts_df) -> Optional[float]:
         min_pain = float("inf")
         max_pain_strike = None
 
-        for price_at_exp in sorted(all_strikes):
-            call_pain = sum(
-                max(0, price_at_exp - strike) * (oi or 0)
-                for strike, oi in zip(calls_df["strike"], calls_df["openInterest"])
-                if strike is not None
-            )
+        for price_at_exp in all_strikes:
+            call_pain = (
+                ((price_at_exp - calls["strike"]).clip(lower=0)) *
+                calls["openInterest"]
+            ).sum()
 
-            put_pain = sum(
-                max(0, strike - price_at_exp) * (oi or 0)
-                for strike, oi in zip(puts_df["strike"], puts_df["openInterest"])
-                if strike is not None
-            )
+            put_pain = (
+                ((puts["strike"] - price_at_exp).clip(lower=0)) *
+                puts["openInterest"]
+            ).sum()
 
             total_pain = call_pain + put_pain
 
@@ -2454,7 +2461,8 @@ def ctx_calculate_max_pain(calls_df, puts_df) -> Optional[float]:
 
         return safe_float(max_pain_strike)
 
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Max pain calculation failed: {e}")
         return None
 
 
