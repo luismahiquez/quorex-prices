@@ -2413,6 +2413,72 @@ def safe_column_sum(df, column_name: str) -> int:
     except Exception:
         return 0
 
+def ctx_calculate_max_pain(calls_df, puts_df) -> Optional[float]:
+    try:
+        all_strikes = set(
+            calls_df["strike"].dropna().tolist() +
+            puts_df["strike"].dropna().tolist()
+        )
+
+        if not all_strikes:
+            return None
+
+        min_pain = float("inf")
+        max_pain_strike = None
+
+        for price_at_exp in sorted(all_strikes):
+            call_pain = sum(
+                max(0, price_at_exp - strike) * (oi or 0)
+                for strike, oi in zip(calls_df["strike"], calls_df["openInterest"])
+                if strike is not None
+            )
+
+            put_pain = sum(
+                max(0, strike - price_at_exp) * (oi or 0)
+                for strike, oi in zip(puts_df["strike"], puts_df["openInterest"])
+                if strike is not None
+            )
+
+            total_pain = call_pain + put_pain
+
+            if total_pain < min_pain:
+                min_pain = total_pain
+                max_pain_strike = price_at_exp
+
+        return safe_float(max_pain_strike)
+
+    except Exception:
+        return None
+
+
+def ctx_iv_rank_status(iv_rank: Optional[float]) -> str:
+    if iv_rank is None:
+        return "UNAVAILABLE"
+    if iv_rank >= 80:
+        return "EXTREME"
+    if iv_rank >= 56:
+        return "SELL_PREMIUM"
+    if iv_rank >= 30:
+        return "NEUTRAL"
+    return "BUY_PREMIUM"
+
+
+def ctx_unusual_volume_ratio(df) -> float:
+    try:
+        max_ratio = 0.0
+
+        for _, row in df.iterrows():
+            vol = row.get("volume") or 0
+            oi = row.get("openInterest") or 0
+
+            if oi > 100:
+                max_ratio = max(max_ratio, vol / oi)
+
+        return round(max_ratio, 2)
+
+    except Exception:
+        return 0.0
+
 
 @app.get("/options/raw/{symbol}")
 def get_options_raw(
