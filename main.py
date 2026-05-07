@@ -5,7 +5,7 @@ from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
@@ -249,11 +249,16 @@ class ContextTechnical(BaseModel):
     sma20: Optional[float]
     sma50: Optional[float]
     sma200: Optional[float]
+
+    atr14: Optional[float] = None
+    crossSignal: str = "NONE"
+    crossDaysAgo: Optional[int] = None
+
     trend: str
     momentumStatus: str
     volumeStatus: str
-    supportLevels: list[float]
-    resistanceLevels: list[float]
+    supportLevels: list[float] = Field(default_factory=list)
+    resistanceLevels: list[float] = Field(default_factory=list)
 
 
 class ContextFundamental(BaseModel):
@@ -516,6 +521,52 @@ def ctx_support_resistance(
     resistance = sorted(resistance)[:4]
 
     return support, resistance
+
+def ctx_calculate_atr14(hist, missing_data: list) -> Optional[float]:
+    try:
+        if hist is None or hist.empty:
+            missing_data.append("ATR14")
+            return None
+
+        atr_series = ta.atr(hist["High"], hist["Low"], hist["Close"], length=14)
+
+        if atr_series is not None and not atr_series.empty:
+            return safe_float(atr_series.iloc[-1])
+
+    except Exception:
+        missing_data.append("ATR14")
+
+    return None
+
+
+def ctx_detect_cross_signal(close, missing_data: list) -> tuple[str, Optional[int]]:
+    try:
+        if close is None or len(close) < 60:
+            return "NONE", None
+
+        sma20_series = ta.sma(close, length=20)
+        sma50_series = ta.sma(close, length=50)
+
+        aligned = pd.DataFrame({
+            "sma20": sma20_series,
+            "sma50": sma50_series
+        }).dropna().tail(15)
+
+        for i in range(len(aligned) - 1, 0, -1):
+            prev = aligned.iloc[i - 1]
+            curr = aligned.iloc[i]
+            days_ago = len(aligned) - 1 - i
+
+            if prev["sma20"] <= prev["sma50"] and curr["sma20"] > curr["sma50"]:
+                return "GOLDEN_CROSS", days_ago
+
+            if prev["sma20"] >= prev["sma50"] and curr["sma20"] < curr["sma50"]:
+                return "DEATH_CROSS", days_ago
+
+    except Exception:
+        missing_data.append("CrossSignal")
+
+    return "NONE", None
 
 
 def ctx_fundamental_summary(
@@ -882,6 +933,9 @@ def get_market_context(ticker: str):
         sma20_val = None
         sma50_val = None
         sma200_val = None
+        atr14_val = None
+        cross_signal = "NONE"
+        cross_days_ago = None
 
         if hist is not None and not hist.empty and len(hist) >= 14:
             close = hist["Close"].dropna()
@@ -916,9 +970,17 @@ def get_market_context(ticker: str):
                     missing_data.append("SMA200")
             else:
                 missing_data.append("SMA200")
-
         else:
             missing_data.extend(["RSI", "SMA20", "SMA50", "SMA200"])
+
+        if hist is not None and not hist.empty:
+            atr14_val = ctx_calculate_atr14(hist, missing_data)
+        
+            try:
+                close = hist["Close"].dropna()
+                cross_signal, cross_days_ago = ctx_detect_cross_signal(close, missing_data)
+            except Exception:
+                missing_data.append("CrossSignal")
 
         support, resistance = ctx_support_resistance(
             hist=hist,
@@ -936,6 +998,9 @@ def get_market_context(ticker: str):
             sma20=sma20_val,
             sma50=sma50_val,
             sma200=sma200_val,
+            atr14=atr14_val,
+            crossSignal=cross_signal,
+            crossDaysAgo=cross_days_ago,
             trend=ctx_trend(price, sma20_val, sma50_val, sma200_val),
             momentumStatus=ctx_momentum_status(price, sma20_val, rsi_val),
             volumeStatus=ctx_volume_status(volume, avg_volume),
