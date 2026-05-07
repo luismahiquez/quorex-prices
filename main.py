@@ -1218,6 +1218,12 @@ def get_market_context(ticker: str):
             headlines=raw_news[:5]
         )
 
+        options_ctx = ctx_options_context(
+            ticker_obj=stock,
+            price=price,
+            missing_data=missing_data
+        )
+        
         return MarketContextResponse(
             ticker=ticker,
             companyName=company_name,
@@ -1230,6 +1236,7 @@ def get_market_context(ticker: str):
             technicalContext=tech_ctx,
             fundamentalContext=fund_ctx,
             newsContext=news_ctx,
+            optionsContext=options_ctx,
             missingData=list(sorted(set(missing_data))),
             cached_at=datetime.utcnow().isoformat()
         )
@@ -2627,6 +2634,118 @@ def ctx_liquidity_score(calls_df, puts_df) -> float:
         pass
 
     return round(min(10.0, score), 1)
+
+def ctx_options_context(
+    ticker_obj,
+    price: float,
+    missing_data: list
+) -> ContextOptions:
+    try:
+        expirations = list(ticker_obj.options)
+
+        if not expirations:
+            missing_data.append("Options Chain")
+            return ContextOptions(dataQuality="UNAVAILABLE")
+
+        exp = choose_swing_expiration(expirations)
+        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+        dte = (exp_date - date.today()).days
+
+        chain = ticker_obj.option_chain(exp)
+        calls_df = chain.calls
+        puts_df = chain.puts
+
+        if calls_df is None or puts_df is None or calls_df.empty or puts_df.empty:
+            missing_data.append("Options Chain Empty")
+            return ContextOptions(
+                expiration=exp,
+                daysToExpiration=dte,
+                dataQuality="LIMITED"
+            )
+
+        total_call_vol = safe_column_sum(calls_df, "volume")
+        total_put_vol = safe_column_sum(puts_df, "volume")
+        total_call_oi = safe_column_sum(calls_df, "openInterest")
+        total_put_oi = safe_column_sum(puts_df, "openInterest")
+
+        pc_vol_ratio = (
+            round(total_put_vol / total_call_vol, 2)
+            if total_call_vol > 0
+            else None
+        )
+
+        pc_oi_ratio = (
+            round(total_put_oi / total_call_oi, 2)
+            if total_call_oi > 0
+            else None
+        )
+
+        max_pain = ctx_calculate_max_pain(calls_df, puts_df)
+
+        max_pain_dist = (
+            round(((max_pain - price) / price) * 100, 2)
+            if max_pain and price
+            else None
+        )
+
+        iv_rank = ctx_calculate_iv_rank(
+            ticker_obj=ticker_obj,
+            calls_df=calls_df,
+            puts_df=puts_df,
+            price=price
+        )
+
+        iv_rank_status = ctx_iv_rank_status(iv_rank)
+
+        skew, skew_status = ctx_calculate_skew(
+            calls_df=calls_df,
+            puts_df=puts_df,
+            price=price
+        )
+
+        call_unusual_ratio = ctx_unusual_volume_ratio(calls_df)
+        put_unusual_ratio = ctx_unusual_volume_ratio(puts_df)
+
+        atm_delta = ctx_atm_delta_estimate(calls_df, price)
+
+        liq_score = ctx_liquidity_score(calls_df, puts_df)
+
+        return ContextOptions(
+            expiration=exp,
+            daysToExpiration=dte,
+
+            ivRank=iv_rank,
+            ivRankStatus=iv_rank_status,
+            ivProxyMethod="ATM_IV_VS_1Y_REALIZED_VOL_RANGE",
+
+            putCallVolumeRatio=pc_vol_ratio,
+            putCallOIRatio=pc_oi_ratio,
+
+            maxPain=max_pain,
+            maxPainDistancePct=max_pain_dist,
+
+            skew=skew,
+            skewStatus=skew_status,
+
+            unusualCallVolume=call_unusual_ratio >= 3,
+            unusualPutVolume=put_unusual_ratio >= 3,
+            unusualCallVolumeRatio=call_unusual_ratio,
+            unusualPutVolumeRatio=put_unusual_ratio,
+
+            atmDeltaEstimate=atm_delta,
+
+            liquidityScore=liq_score,
+            dataQuality=(
+                "GOOD"
+                if liq_score is not None and liq_score >= 5
+                else "LIMITED"
+            )
+        )
+
+    except Exception as e:
+        logger.warning(f"Options context failed: {e}")
+        missing_data.append("Options Context")
+        return ContextOptions(dataQuality="ERROR")
 
 
 @app.get("/options/raw/{symbol}")
