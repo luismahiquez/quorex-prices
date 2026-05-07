@@ -2374,6 +2374,59 @@ def choose_swing_expiration(expirations: list[str]) -> str:
     # Último fallback
     return expirations[0]
 
+
+def choose_context_expiration(expirations: list[str]) -> str:
+    """
+    Expiration selector for AI Market Context.
+    Does not replace choose_swing_expiration().
+    Goal: choose a more stable options expiration for analysis/scoring.
+    """
+    if not expirations:
+        raise ValueError("No expirations available")
+
+    today = date.today()
+    candidates = []
+
+    for exp in expirations:
+        try:
+            exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+
+            if dte >= 7:
+                candidates.append((exp, dte))
+
+        except Exception:
+            continue
+
+    ideal = [
+        item for item in candidates
+        if 30 <= item[1] <= 45
+    ]
+
+    if ideal:
+        return sorted(ideal, key=lambda x: abs(x[1] - 35))[0][0]
+
+    fallback = [
+        item for item in candidates
+        if 21 <= item[1] <= 60
+    ]
+
+    if fallback:
+        return sorted(fallback, key=lambda x: abs(x[1] - 35))[0][0]
+
+    conservative = [
+        item for item in candidates
+        if item[1] >= 14
+    ]
+
+    if conservative:
+        return sorted(conservative, key=lambda x: x[1])[0][0]
+
+    if candidates:
+        return sorted(candidates, key=lambda x: x[1])[0][0]
+
+    return expirations[0]
+
 def count_valid_contracts(contracts):
     return sum(
         1 for c in contracts
@@ -2655,7 +2708,7 @@ def ctx_options_context(
             missing_data.append("Options Chain")
             return ContextOptions(dataQuality="UNAVAILABLE")
 
-        exp = choose_swing_expiration(expirations)
+        exp = choose_context_expiration(expirations)
         exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
         dte = (exp_date - date.today()).days
 
