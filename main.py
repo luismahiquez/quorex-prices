@@ -301,6 +301,25 @@ class ContextOptions(BaseModel):
     liquidityScore: Optional[float] = None
     dataQuality: str = "UNAVAILABLE"
 
+class ContextMarketRegime(BaseModel):
+    spyChangePercent: Optional[float] = None
+    spyTrend: str = "UNKNOWN"
+
+    qqqChangePercent: Optional[float] = None
+    qqqTrend: str = "UNKNOWN"
+
+    esFuturesChangePct: Optional[float] = None
+    nqFuturesChangePct: Optional[float] = None
+
+    vixPrice: Optional[float] = None
+    vixLevel: str = "UNKNOWN"
+
+    sectorEtf: Optional[str] = None
+    sectorChangePercent: Optional[float] = None
+    sectorTrend: str = "UNKNOWN"
+
+    marketBias: str = "UNKNOWN"
+    dataQuality: str = "UNAVAILABLE"
 
 class ContextNewsItem(BaseModel):
     title: str
@@ -332,6 +351,7 @@ class MarketContextResponse(BaseModel):
     missingData: list[str]
     cached_at: Optional[str] = None
     optionsContext: Optional[ContextOptions] = None
+    marketRegimeContext: Optional[ContextMarketRegime] = None
 
 
 # ============================================================
@@ -714,6 +734,193 @@ def ctx_earnings_info(info: dict) -> tuple[Optional[str], Optional[int], str]:
 def ctx_sector_etf(info: dict) -> Optional[str]:
     sector = info.get("sector", "")
     return SECTOR_ETF_MAP.get(sector)
+
+def ctx_simple_market_move(symbol: str) -> tuple[Optional[float], str]:
+    try:
+        ticker = yf.Ticker(symbol)
+
+        current_price = get_latest_intraday_price(ticker)
+        reference_price = get_reference_price(ticker)
+
+        if current_price is None:
+            current_price = get_info_price(ticker)
+
+        if current_price is None or reference_price is None or reference_price == 0:
+            return None, "UNKNOWN"
+
+        change_pct = round(((current_price - reference_price) / reference_price) * 100, 2)
+
+        if change_pct >= 0.75:
+            return change_pct, "STRONG_UP"
+
+        if change_pct >= 0.20:
+            return change_pct, "UP"
+
+        if change_pct <= -0.75:
+            return change_pct, "STRONG_DOWN"
+
+        if change_pct <= -0.20:
+            return change_pct, "DOWN"
+
+        return change_pct, "FLAT"
+
+    except Exception:
+        return None, "UNKNOWN"
+
+
+def ctx_market_regime_context(
+    sector_etf: Optional[str],
+    missing_data: list
+) -> ContextMarketRegime:
+
+    try:
+        # ── SPY ──
+        spy_change, spy_trend = ctx_simple_market_move("SPY")
+
+        # ── QQQ ──
+        qqq_change, qqq_trend = ctx_simple_market_move("QQQ")
+
+        # ── ES / NQ Futures ──
+        es_change, _ = ctx_simple_market_move("ES=F")
+        nq_change, _ = ctx_simple_market_move("NQ=F")
+
+        # ── VIX ──
+        vix_price = None
+        vix_level = "UNKNOWN"
+
+        try:
+            vix_ticker = yf.Ticker("^VIX")
+
+            vix_price = get_latest_intraday_price(vix_ticker)
+
+            if vix_price is None:
+                vix_price = get_info_price(vix_ticker)
+
+            vix_price = safe_float(vix_price)
+
+            if vix_price is not None:
+
+                if vix_price < 15:
+                    vix_level = "LOW"
+
+                elif vix_price < 20:
+                    vix_level = "NORMAL"
+
+                elif vix_price < 25:
+                    vix_level = "ELEVATED"
+
+                else:
+                    vix_level = "HIGH"
+
+            else:
+                missing_data.append("VIX")
+
+        except Exception:
+            missing_data.append("VIX")
+
+        # ── Sector ETF ──
+        sector_change = None
+        sector_trend = "UNKNOWN"
+
+        if sector_etf:
+            sector_change, sector_trend = ctx_simple_market_move(sector_etf)
+
+        else:
+            missing_data.append("Sector ETF")
+
+        # ── Voting system ──
+        bullish_votes = 0
+        bearish_votes = 0
+
+        if spy_trend in ["UP", "STRONG_UP"]:
+            bullish_votes += 1
+
+        elif spy_trend in ["DOWN", "STRONG_DOWN"]:
+            bearish_votes += 1
+
+        if qqq_trend in ["UP", "STRONG_UP"]:
+            bullish_votes += 1
+
+        elif qqq_trend in ["DOWN", "STRONG_DOWN"]:
+            bearish_votes += 1
+
+        if sector_trend in ["UP", "STRONG_UP"]:
+            bullish_votes += 1
+
+        elif sector_trend in ["DOWN", "STRONG_DOWN"]:
+            bearish_votes += 1
+
+        if vix_level in ["LOW", "NORMAL"]:
+            bullish_votes += 1
+
+        elif vix_level in ["ELEVATED", "HIGH"]:
+            bearish_votes += 1
+
+        # ── Futures vote ──
+        if es_change is not None and nq_change is not None:
+
+            futures_avg = (es_change + nq_change) / 2
+
+            if futures_avg >= 0.20:
+                bullish_votes += 1
+
+            elif futures_avg <= -0.20:
+                bearish_votes += 1
+
+        else:
+            missing_data.append("Futures")
+
+        # ── Final market bias ──
+        if bullish_votes >= 3:
+            market_bias = "BULLISH"
+
+        elif bearish_votes >= 3:
+            market_bias = "BEARISH"
+
+        else:
+            market_bias = "NEUTRAL"
+
+        # ── Data quality ──
+        data_quality = "GOOD"
+
+        if (
+            spy_change is None
+            or qqq_change is None
+            or vix_price is None
+            or es_change is None
+            or nq_change is None
+        ):
+            data_quality = "LIMITED"
+
+        return ContextMarketRegime(
+            spyChangePercent=spy_change,
+            spyTrend=spy_trend,
+
+            qqqChangePercent=qqq_change,
+            qqqTrend=qqq_trend,
+
+            esFuturesChangePct=es_change,
+            nqFuturesChangePct=nq_change,
+
+            vixPrice=vix_price,
+            vixLevel=vix_level,
+
+            sectorEtf=sector_etf,
+            sectorChangePercent=sector_change,
+            sectorTrend=sector_trend,
+
+            marketBias=market_bias,
+            dataQuality=data_quality
+        )
+
+    except Exception as e:
+        logger.warning(f"Market regime context failed: {e}")
+
+        missing_data.append("Market Regime")
+
+        return ContextMarketRegime(
+            dataQuality="ERROR"
+        )
 
 
 # ============================================================
@@ -1301,6 +1508,11 @@ def get_market_context(ticker: str):
             price=price,
             missing_data=missing_data
         )
+
+        market_regime_ctx = ctx_market_regime_context(
+            sector_etf=sector_etf,
+            missing_data=missing_data
+        )
         
         return MarketContextResponse(
             ticker=ticker,
@@ -1316,6 +1528,7 @@ def get_market_context(ticker: str):
             fundamentalContext=fund_ctx,
             newsContext=news_ctx,
             optionsContext=options_ctx,
+            marketRegimeContext=market_regime_ctx,
             missingData=list(sorted(set(missing_data))),
             cached_at=datetime.utcnow().isoformat()
         )
