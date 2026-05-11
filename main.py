@@ -698,8 +698,7 @@ SECTOR_ETF_MAP = {
     "Real Estate": "XLRE",
 }
 
-
-def ctx_earnings_info(info: dict) -> tuple[Optional[str], Optional[int], str]:
+def ctx_earnings_info(info: dict, stock=None) -> tuple[Optional[str], Optional[int], str]:
     try:
         earnings_ts = (
             info.get("earningsTimestamp")
@@ -711,25 +710,38 @@ def ctx_earnings_info(info: dict) -> tuple[Optional[str], Optional[int], str]:
                 int(earnings_ts),
                 timezone.utc
             ).date()
-
             days = (earnings_dt - date.today()).days
 
+            # Si la fecha ya pasó, buscar próxima en calendar
             if days < 0:
-                return str(earnings_dt), days, "CLEAR"
+                if stock is not None:
+                    try:
+                        cal = stock.calendar
+                        if cal is not None and "Earnings Date" in cal:
+                            next_date = cal["Earnings Date"]
+                            if isinstance(next_date, list):
+                                next_date = next_date[0]
+                            earnings_dt = pd.Timestamp(next_date).date()
+                            days = (earnings_dt - date.today()).days
+                        else:
+                            return str(earnings_dt), days, "CLEAR"
+                    except Exception:
+                        return str(earnings_dt), days, "CLEAR"
+                else:
+                    return str(earnings_dt), days, "CLEAR"
 
             if days <= 3:
                 return str(earnings_dt), days, "EARNINGS_INMINENTES"
-
             if days <= 7:
                 return str(earnings_dt), days, "EARNINGS_PROXIMOS"
-
+            if days <= 14:
+                return str(earnings_dt), days, "EARNINGS_PROXIMOS"
             return str(earnings_dt), days, "CLEAR"
 
     except Exception:
         pass
 
     return None, None, "CLEAR"
-
 
 def ctx_sector_etf(info: dict) -> Optional[str]:
     sector = info.get("sector", "")
