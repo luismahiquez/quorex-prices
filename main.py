@@ -1356,7 +1356,7 @@ def get_market_context(ticker: str):
         if debt_to_equity is None:
             missing_data.append("Debt To Equity")
 
-        earnings_date, days_to_earnings, earnings_flag = ctx_earnings_info(info)
+        earnings_date, days_to_earnings, earnings_flag = ctx_earnings_info(info, stock)
 
         fund_ctx = ContextFundamental(
             marketCap=market_cap,
