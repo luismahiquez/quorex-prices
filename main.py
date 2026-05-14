@@ -11,6 +11,8 @@ import pandas as pd
 import pandas_ta as ta
 import re
 import httpx
+from scipy.stats import norm
+import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -352,6 +354,49 @@ class MarketContextResponse(BaseModel):
     cached_at: Optional[str] = None
     optionsContext: Optional[ContextOptions] = None
     marketRegimeContext: Optional[ContextMarketRegime] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pydantic models
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+class GexNode(BaseModel):
+    strike: float
+    gex: float          # raw dollars
+    gexK: float         # en $K (display)
+    color: str          # "yellow" | "purple"
+    isKing: bool
+ 
+ 
+class GexExpiration(BaseModel):
+    expiration: str
+    daysToExpiration: int
+    nodes: list[GexNode]
+    kingNode: Optional[GexNode]
+    netGex: float
+    netGexK: float
+ 
+ 
+class GexRegime(BaseModel):
+    gex: str            # "positive" | "negative"
+    combined: str       # "stable" | "unstable" | "mixed"
+ 
+ 
+class GexContext(BaseModel):
+    strongestAbove: Optional[dict] = None
+    strongestBelow: Optional[dict] = None
+    bias: str
+ 
+ 
+class GexSurfaceResponse(BaseModel):
+    symbol: str
+    underlyingPrice: float
+    expirations: list[str]
+    surface: dict                       # expiration -> GexExpiration
+    globalKing: Optional[dict] = None  # node con mayor |gex| en toda la superficie
+    regime: GexRegime
+    context: GexContext
+    timestamp: str
 
 
 # ============================================================
@@ -1952,6 +1997,100 @@ def build_futures_structure(results):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Black-Scholes gamma (solo necesitamos gamma)
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+def _bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        return float(norm.pdf(d1) / (S * sigma * np.sqrt(T)))
+    except Exception:
+        return 0.0
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# GEX por strike para una expiración
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+def _calc_gex_nodes(chain_data: dict, r: float = 0.045) -> list[GexNode]:
+    S   = chain_data["underlyingPrice"]
+    dte = chain_data["daysToExpiration"]
+    T   = max(dte, 0.5) / 365.0
+ 
+    raw: dict[float, float] = {}
+ 
+    for c in chain_data.get("calls", []):
+        K   = float(c.get("strike") or 0)
+        IV  = float(c.get("impliedVolatility") or 0)
+        OI  = int(c.get("openInterest") or 0)
+        if IV <= 0 or OI <= 0 or K <= 0:
+            continue
+        gamma = _bs_gamma(S, K, T, r, IV)
+        raw[K] = raw.get(K, 0.0) + (-gamma * OI * 100 * S * S * 0.01)
+ 
+    for p in chain_data.get("puts", []):
+        K   = float(p.get("strike") or 0)
+        IV  = float(p.get("impliedVolatility") or 0)
+        OI  = int(p.get("openInterest") or 0)
+        if IV <= 0 or OI <= 0 or K <= 0:
+            continue
+        gamma = _bs_gamma(S, K, T, r, IV)
+        raw[K] = raw.get(K, 0.0) + (gamma * OI * 100 * S * S * 0.01)
+ 
+    nodes = []
+    for K in sorted(raw.keys(), reverse=True):
+        gex  = raw[K]
+        gexK = round(gex / 1_000, 1)
+        nodes.append(GexNode(
+            strike  = K,
+            gex     = round(gex, 2),
+            gexK    = gexK,
+            color   = "yellow" if gex >= 0 else "purple",
+            isKing  = False
+        ))
+ 
+    # Marcar king de esta expiración
+    if nodes:
+        king_idx = max(range(len(nodes)), key=lambda i: abs(nodes[i].gex))
+        nodes[king_idx] = nodes[king_idx].model_copy(update={"isKing": True})
+ 
+    return nodes
+ 
+ 
+def _build_gex_expiration(chain_data: dict) -> GexExpiration:
+    nodes   = _calc_gex_nodes(chain_data)
+    king    = next((n for n in nodes if n.isKing), None)
+    net_gex = sum(n.gex for n in nodes)
+ 
+    return GexExpiration(
+        expiration        = chain_data["expiration"],
+        daysToExpiration  = chain_data["daysToExpiration"],
+        nodes             = nodes,
+        kingNode          = king,
+        netGex            = round(net_gex, 2),
+        netGexK           = round(net_gex / 1_000, 1)
+    )
+ 
+ 
+def _bias_text(spot: float, above: Optional[dict], below: Optional[dict]) -> str:
+    if above is None and below is None:
+        return "No significant nodes detected"
+    if above is None:
+        return f"Downside pull toward ${below['strike']} ({below['color']})"
+    if below is None:
+        return f"Upside pull toward ${above['strike']} ({above['color']})"
+    if abs(above["gexK"]) > abs(below["gexK"]) * 1.5:
+        direction = "upside drift" if above["color"] == "yellow" else "resistance"
+        return f"Strong {direction} at ${above['strike']}"
+    if abs(below["gexK"]) > abs(above["gexK"]) * 1.5:
+        direction = "support" if below["color"] == "yellow" else "downside acceleration"
+        return f"Strong {direction} at ${below['strike']}"
+    return f"Balanced range ${below['strike']} — ${above['strike']}"
+
+
 @app.get("/futures")
 def get_futures():
     symbols = {
@@ -3217,6 +3356,125 @@ def get_options_raw(
                 "error": str(e)
             }
         )
+
+@app.get("/gex-surface/{symbol}", response_model=GexSurfaceResponse)
+def get_gex_surface(
+    symbol: str,
+    max_expirations: int = Query(default=6, ge=1, le=12),
+    r: float = Query(default=0.045, description="Risk-free rate")
+):
+    """
+    Calcula la superficie GEX completa (strike × expiración) para un símbolo.
+ 
+    - Itera sobre las primeras `max_expirations` expiraciones disponibles
+    - Calcula gamma via Black-Scholes usando IV y OI de yfinance
+    - Retorna nodos por strike, King Node global y régimen GEX
+    - Valores en $K para display (gexK)
+    """
+    symbol = symbol.upper().strip()
+ 
+    try:
+        ticker     = yf.Ticker(symbol)
+        all_exps   = list(ticker.options)
+ 
+        if not all_exps:
+            raise HTTPException(status_code=404, detail=f"No options found for {symbol}")
+ 
+        # Precio spot
+        underlying_price = get_underlying_price(ticker)
+        if underlying_price is None:
+            raise HTTPException(status_code=404, detail=f"No price data for {symbol}")
+ 
+        # Seleccionar expiraciones — las primeras N, filtrando DTE >= 1
+        today = date.today()
+        selected_exps = []
+        for exp in all_exps:
+            try:
+                dte = (datetime.strptime(exp, "%Y-%m-%d").date() - today).days
+                if dte >= 1:
+                    selected_exps.append((exp, dte))
+            except Exception:
+                continue
+            if len(selected_exps) >= max_expirations:
+                break
+ 
+        if not selected_exps:
+            raise HTTPException(status_code=404, detail="No valid expirations found")
+ 
+        # Calcular GEX para cada expiración
+        surface: dict[str, GexExpiration] = {}
+        all_nodes_flat: list[dict] = []
+ 
+        for exp, dte in selected_exps:
+            try:
+                chain     = ticker.option_chain(exp)
+                calls_raw = [clean_contract(row, "CALL", exp) for _, row in chain.calls.iterrows()]
+                puts_raw  = [clean_contract(row, "PUT",  exp) for _, row in chain.puts.iterrows()]
+ 
+                chain_data = {
+                    "symbol":           symbol,
+                    "underlyingPrice":  underlying_price,
+                    "expiration":       exp,
+                    "daysToExpiration": dte,
+                    "calls":            calls_raw,
+                    "puts":             puts_raw,
+                }
+ 
+                gex_exp = _build_gex_expiration(chain_data)
+                surface[exp] = gex_exp
+ 
+                for node in gex_exp.nodes:
+                    all_nodes_flat.append({
+                        **node.model_dump(),
+                        "expiration": exp,
+                        "dte":        dte
+                    })
+ 
+            except Exception as e:
+                logger.warning(f"GEX calc failed for {symbol} {exp}: {e}")
+                continue
+ 
+        if not surface:
+            raise HTTPException(status_code=500, detail="GEX calculation failed for all expirations")
+ 
+        # King Node global
+        global_king = None
+        if all_nodes_flat:
+            global_king = max(all_nodes_flat, key=lambda n: abs(n["gex"]))
+ 
+        # Régimen neto (basado en la primera expiración = más relevante intraday)
+        first_exp_data = surface[selected_exps[0][0]]
+        net_gex_sign   = "positive" if first_exp_data.netGex >= 0 else "negative"
+        combined       = "stable" if net_gex_sign == "positive" else "unstable"
+ 
+        # Context: nodos más fuertes arriba y abajo del spot
+        all_first_nodes = [n.model_dump() for n in first_exp_data.nodes]
+        above = [n for n in all_first_nodes if n["strike"] > underlying_price]
+        below = [n for n in all_first_nodes if n["strike"] < underlying_price]
+ 
+        strongest_above = max(above, key=lambda n: abs(n["gex"]), default=None)
+        strongest_below = max(below, key=lambda n: abs(n["gex"]), default=None)
+ 
+        return GexSurfaceResponse(
+            symbol          = symbol,
+            underlyingPrice = underlying_price,
+            expirations     = [e for e, _ in selected_exps],
+            surface         = {k: v.model_dump() for k, v in surface.items()},
+            globalKing      = global_king,
+            regime          = GexRegime(gex=net_gex_sign, combined=combined),
+            context         = GexContext(
+                strongestAbove = strongest_above,
+                strongestBelow = strongest_below,
+                bias           = _bias_text(underlying_price, strongest_above, strongest_below)
+            ),
+            timestamp = datetime.utcnow().isoformat()
+        )
+ 
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GEX surface error for {symbol}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"GEX surface failed: {str(e)}")
 
 @app.get("/search")
 def search_tickers(q: str):
