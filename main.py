@@ -365,9 +365,23 @@ class GexNode(BaseModel):
     gex: float          # raw dollars
     gexK: float         # en $K (display)
     color: str          # "yellow" | "purple"
+    side: str           # "positive" | "negative"
+    intensity: float    # 0..1 para heatmap
+    label: str          # texto corto para tooltip/UI
     isKing: bool
  
- 
+class GexHeatmapCell(BaseModel):
+    expiration: str
+    dte: int
+    strike: float
+    gex: float
+    gexK: float
+    color: str
+    side: str
+    intensity: float
+    label: str
+    isKing: bool
+
 class GexExpiration(BaseModel):
     expiration: str
     daysToExpiration: int
@@ -392,8 +406,9 @@ class GexSurfaceResponse(BaseModel):
     symbol: str
     underlyingPrice: float
     expirations: list[str]
-    surface: dict                       # expiration -> GexExpiration
-    globalKing: Optional[dict] = None  # node con mayor |gex| en toda la superficie
+    surface: dict
+    heatmapMatrix: list[GexHeatmapCell]
+    globalKing: Optional[dict] = None
     regime: GexRegime
     context: GexContext
     timestamp: str
@@ -2041,22 +2056,28 @@ def _calc_gex_nodes(chain_data: dict, r: float = 0.045) -> list[GexNode]:
         raw[K] = raw.get(K, 0.0) + (gamma * OI * 100 * S * S * 0.01)
  
     nodes = []
+    max_abs_gex = max((abs(v) for v in raw.values()), default=0)
     for K in sorted(raw.keys(), reverse=True):
-        gex  = raw[K]
+        gex = raw[K]
         gexK = round(gex / 1_000, 1)
+        rounded_gex = round(gex, 2)
+    
         nodes.append(GexNode(
-            strike  = K,
-            gex     = round(gex, 2),
-            gexK    = gexK,
-            color   = "yellow" if gex >= 0 else "purple",
-            isKing  = False
+            strike=K,
+            gex=rounded_gex,
+            gexK=gexK,
+            color="yellow" if gex >= 0 else "purple",
+            side="positive" if gex >= 0 else "negative",
+            intensity=round(abs(gex) / max_abs_gex, 4) if max_abs_gex > 0 else 0,
+            label=f"${K:g} | {gexK}K",
+            isKing=False
         ))
  
     # Marcar king de esta expiración
     if nodes:
         king_idx = max(range(len(nodes)), key=lambda i: abs(nodes[i].gex))
         nodes[king_idx] = nodes[king_idx].model_copy(update={"isKing": True})
- 
+     
     return nodes
  
  
@@ -3456,18 +3477,19 @@ def get_gex_surface(
         strongest_below = max(below, key=lambda n: abs(n["gex"]), default=None)
  
         return GexSurfaceResponse(
-            symbol          = symbol,
-            underlyingPrice = underlying_price,
-            expirations     = [e for e, _ in selected_exps],
-            surface         = {k: v.model_dump() for k, v in surface.items()},
-            globalKing      = global_king,
-            regime          = GexRegime(gex=net_gex_sign, combined=combined),
-            context         = GexContext(
-                strongestAbove = strongest_above,
-                strongestBelow = strongest_below,
-                bias           = _bias_text(underlying_price, strongest_above, strongest_below)
+            symbol=symbol,
+            underlyingPrice=underlying_price,
+            expirations=[e for e, _ in selected_exps],
+            surface={k: v.model_dump() for k, v in surface.items()},
+            heatmapMatrix=all_nodes_flat,
+            globalKing=global_king,
+            regime=GexRegime(gex=net_gex_sign, combined=combined),
+            context=GexContext(
+                strongestAbove=strongest_above,
+                strongestBelow=strongest_below,
+                bias=_bias_text(underlying_price, strongest_above, strongest_below)
             ),
-            timestamp = datetime.utcnow().isoformat()
+            timestamp=datetime.utcnow().isoformat()
         )
  
     except HTTPException:
