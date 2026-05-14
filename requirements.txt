@@ -5,3 +5,5 @@ pandas
 pandas-ta
 pydantic
 httpx
+scipy
+numpy
