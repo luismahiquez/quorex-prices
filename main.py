@@ -3108,56 +3108,62 @@ def ctx_atm_delta_estimate(calls_df, price: float) -> Optional[float]:
 
 def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
     score = 0.0
-
     try:
-        max_oi = max(
-            calls_df["openInterest"].fillna(0).max(),
-            puts_df["openInterest"].fillna(0).max()
-        )
+        # OI — solo strikes NTM ±15%
+        atm_calls = calls_df[
+            (calls_df["strike"] >= price * 0.85) &
+            (calls_df["strike"] <= price * 1.15)
+        ]
+        atm_puts = puts_df[
+            (puts_df["strike"] >= price * 0.85) &
+            (puts_df["strike"] <= price * 1.15)
+        ]
 
+        max_oi = max(
+            atm_calls["openInterest"].fillna(0).max() if not atm_calls.empty else 0,
+            atm_puts["openInterest"].fillna(0).max()  if not atm_puts.empty else 0
+        )
         if max_oi > 5000:
             score += 3
 
+        # Spread — dentro del loop, ±20% como antes
         valid_spreads = []
-
         for df in [calls_df, puts_df]:
             near_money = df[
                 (df["strike"] >= price * 0.80) &
                 (df["strike"] <= price * 1.20)
             ].copy()
-        
+
             for _, row in near_money.iterrows():
                 bid = row.get("bid") or 0
                 ask = row.get("ask") or 0
                 mid = (bid + ask) / 2
-
-        if mid > 0 and ask >= bid:
-            spread_pct = (ask - bid) / mid
-            valid_spreads.append(spread_pct)
+                if mid > 0 and ask >= bid:          # ← dentro del for
+                    spread_pct = (ask - bid) / mid
+                    valid_spreads.append(spread_pct)
 
         if valid_spreads:
             avg_spread = sum(valid_spreads) / len(valid_spreads)
-
             if avg_spread < 0.05:
                 score += 3
             elif avg_spread < 0.10:
                 score += 1.5
 
+        # Volumen — chain completa (medida de actividad general)
         total_vol = (
             safe_column_sum(calls_df, "volume") +
             safe_column_sum(puts_df, "volume")
         )
-
         if total_vol > 1000:
             score += 2
         elif total_vol > 500:
             score += 1
 
-        total_strikes = len(calls_df) + len(puts_df)
-
-        if total_strikes > 40:
+        # Strikes — solo NTM
+        total_strikes = len(atm_calls) + len(atm_puts)
+        if total_strikes > 20:
             score += 2
-        elif total_strikes > 20:
+        elif total_strikes > 10:
             score += 1
 
     except Exception:
