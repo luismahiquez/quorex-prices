@@ -3105,17 +3105,69 @@ def ctx_atm_delta_estimate(calls_df, price: float) -> Optional[float]:
     except Exception:
         return None
 
-
-def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
+def ctx_liquidity_score(ticker_obj, price: float) -> float:
     """
-    Liquidity score 0-10 based on NTM (Near-The-Money) options activity.
+    Liquidity score 0-10 based on NTM options activity from the
+    STANDARD MONTHLY expiration (3rd Friday of month, within 21-90 DTE).
     
-    Uses a unified validity filter: a contract counts only if it has
-    a real bid, real ask, real open interest, and non-junk IV.
-    This matches the criteria used by /options/raw count_valid_contracts.
+    Standard monthlies concentrate institutional OI and tighter spreads,
+    making them the most reliable source for measuring true liquidity.
+    
+    Falls back to the closest available expiration in 21-60 DTE if no
+    standard monthly is available.
+    
+    This is INDEPENDENT from the expiration reported in ContextOptions —
+    that one keeps the 30-45 DTE preference for trading recommendations.
     """
     score = 0.0
     try:
+        # ── Pick the most liquid expiration for measurement ─────────────
+        expirations = list(ticker_obj.options)
+        if not expirations:
+            return 0.0
+
+        today = date.today()
+        candidates = []
+        for exp in expirations:
+            try:
+                exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                if dte < 7:
+                    continue
+                is_third_friday = (
+                    exp_date.weekday() == 4 and
+                    15 <= exp_date.day <= 21
+                )
+                candidates.append((exp, dte, is_third_friday))
+            except Exception:
+                continue
+
+        if not candidates:
+            return 0.0
+
+        # Priority 1: standard monthly in 21-90 DTE, prefer ~45 DTE
+        monthlies = [c for c in candidates if c[2] and 21 <= c[1] <= 90]
+        if monthlies:
+            chosen_exp = sorted(monthlies, key=lambda x: abs(x[1] - 45))[0][0]
+            chosen_source = "MONTHLY"
+        else:
+            # Fallback: closest to 35 DTE in 21-60 range
+            fallback = [c for c in candidates if 21 <= c[1] <= 60]
+            if fallback:
+                chosen_exp = sorted(fallback, key=lambda x: abs(x[1] - 35))[0][0]
+                chosen_source = "FALLBACK_21_60"
+            else:
+                chosen_exp = sorted(candidates, key=lambda x: x[1])[0][0]
+                chosen_source = "FALLBACK_NEAREST"
+
+        # ── Load the chain for measurement ──────────────────────────────
+        chain = ticker_obj.option_chain(chosen_exp)
+        calls_df = chain.calls
+        puts_df = chain.puts
+
+        if calls_df is None or puts_df is None or calls_df.empty or puts_df.empty:
+            return 0.0
+
         # ── Unified validity filter ─────────────────────────────────────
         def is_valid(row):
             bid = row.get("bid") or 0
@@ -3124,9 +3176,6 @@ def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
             iv = row.get("impliedVolatility") or 0
             return bid > 0 and ask > 0 and oi > 0 and iv >= 0.05
 
-        # ── NTM ranges ──────────────────────────────────────────────────
-        # ±15% for OI/strikes (stricter, focuses on real tradeable zone)
-        # ±20% for spread (wider, to have enough samples)
         ntm_calls_15 = calls_df[
             (calls_df["strike"] >= price * 0.85) &
             (calls_df["strike"] <= price * 1.15)
@@ -3144,7 +3193,6 @@ def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
             (puts_df["strike"] <= price * 1.20)
         ]
 
-        # Apply validity filter
         valid_calls_15 = ntm_calls_15[ntm_calls_15.apply(is_valid, axis=1)] \
             if not ntm_calls_15.empty else ntm_calls_15
         valid_puts_15 = ntm_puts_15[ntm_puts_15.apply(is_valid, axis=1)] \
@@ -3210,7 +3258,7 @@ def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
             score += 1
 
         logger.info(
-            f"liquidity_score breakdown: "
+            f"liquidity_score breakdown: exp={chosen_exp} src={chosen_source} "
             f"max_oi={max_oi} valid_strikes={valid_strikes_count} "
             f"avg_spread={(sum(valid_spreads)/len(valid_spreads)) if valid_spreads else 'n/a'} "
             f"total_vol={total_vol} final={round(min(10.0, score), 1)}"
@@ -3294,7 +3342,7 @@ def ctx_options_context(
 
         atm_delta = ctx_atm_delta_estimate(calls_df, price)
 
-        liq_score = ctx_liquidity_score(calls_df, puts_df, price)
+        liq_score = ctx_liquidity_score(ticker_obj, price)
 
         return ContextOptions(
             expiration=exp,
