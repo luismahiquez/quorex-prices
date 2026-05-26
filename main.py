@@ -3107,38 +3107,75 @@ def ctx_atm_delta_estimate(calls_df, price: float) -> Optional[float]:
 
 
 def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
+    """
+    Liquidity score 0-10 based on NTM (Near-The-Money) options activity.
+    
+    Uses a unified validity filter: a contract counts only if it has
+    a real bid, real ask, real open interest, and non-junk IV.
+    This matches the criteria used by /options/raw count_valid_contracts.
+    """
     score = 0.0
     try:
-        # OI — solo strikes NTM ±15%
-        atm_calls = calls_df[
+        # ── Unified validity filter ─────────────────────────────────────
+        def is_valid(row):
+            bid = row.get("bid") or 0
+            ask = row.get("ask") or 0
+            oi = row.get("openInterest") or 0
+            iv = row.get("impliedVolatility") or 0
+            return bid > 0 and ask > 0 and oi > 0 and iv >= 0.05
+
+        # ── NTM ranges ──────────────────────────────────────────────────
+        # ±15% for OI/strikes (stricter, focuses on real tradeable zone)
+        # ±20% for spread (wider, to have enough samples)
+        ntm_calls_15 = calls_df[
             (calls_df["strike"] >= price * 0.85) &
             (calls_df["strike"] <= price * 1.15)
         ]
-        atm_puts = puts_df[
+        ntm_puts_15 = puts_df[
             (puts_df["strike"] >= price * 0.85) &
             (puts_df["strike"] <= price * 1.15)
         ]
+        ntm_calls_20 = calls_df[
+            (calls_df["strike"] >= price * 0.80) &
+            (calls_df["strike"] <= price * 1.20)
+        ]
+        ntm_puts_20 = puts_df[
+            (puts_df["strike"] >= price * 0.80) &
+            (puts_df["strike"] <= price * 1.20)
+        ]
 
+        # Apply validity filter
+        valid_calls_15 = ntm_calls_15[ntm_calls_15.apply(is_valid, axis=1)] \
+            if not ntm_calls_15.empty else ntm_calls_15
+        valid_puts_15 = ntm_puts_15[ntm_puts_15.apply(is_valid, axis=1)] \
+            if not ntm_puts_15.empty else ntm_puts_15
+        valid_calls_20 = ntm_calls_20[ntm_calls_20.apply(is_valid, axis=1)] \
+            if not ntm_calls_20.empty else ntm_calls_20
+        valid_puts_20 = ntm_puts_20[ntm_puts_20.apply(is_valid, axis=1)] \
+            if not ntm_puts_20.empty else ntm_puts_20
+
+        # ── Block 1: Max OI on a single NTM strike (0-3 pts) ────────────
         max_oi = max(
-            atm_calls["openInterest"].fillna(0).max() if not atm_calls.empty else 0,
-            atm_puts["openInterest"].fillna(0).max()  if not atm_puts.empty else 0
+            valid_calls_15["openInterest"].fillna(0).max() if not valid_calls_15.empty else 0,
+            valid_puts_15["openInterest"].fillna(0).max() if not valid_puts_15.empty else 0
         )
         if max_oi > 5000:
             score += 3
+        elif max_oi > 1000:
+            score += 2
+        elif max_oi > 200:
+            score += 1
 
-        # Spread — dentro del loop, ±20% como antes
+        # ── Block 2: Avg spread on valid NTM contracts (0-3 pts) ────────
         valid_spreads = []
-        for df in [calls_df, puts_df]:
-            near_money = df[
-                (df["strike"] >= price * 0.80) &
-                (df["strike"] <= price * 1.20)
-            ].copy()
-
-            for _, row in near_money.iterrows():
+        for df in [valid_calls_20, valid_puts_20]:
+            if df.empty:
+                continue
+            for _, row in df.iterrows():
                 bid = row.get("bid") or 0
                 ask = row.get("ask") or 0
                 mid = (bid + ask) / 2
-                if mid > 0 and ask >= bid:          # ← dentro del for
+                if mid > 0 and ask >= bid:
                     spread_pct = (ask - bid) / mid
                     valid_spreads.append(spread_pct)
 
@@ -3147,27 +3184,40 @@ def ctx_liquidity_score(calls_df, puts_df, price: float) -> float:
             if avg_spread < 0.05:
                 score += 3
             elif avg_spread < 0.10:
-                score += 1.5
+                score += 2
+            elif avg_spread < 0.20:
+                score += 1
 
-        # Volumen — chain completa (medida de actividad general)
+        # ── Block 3: Total chain volume (0-2 pts) ───────────────────────
         total_vol = (
             safe_column_sum(calls_df, "volume") +
             safe_column_sum(puts_df, "volume")
         )
-        if total_vol > 1000:
+        if total_vol > 5000:
             score += 2
-        elif total_vol > 500:
+        elif total_vol > 1000:
+            score += 1.5
+        elif total_vol > 200:
             score += 1
 
-        # Strikes — solo NTM
-        total_strikes = len(atm_calls) + len(atm_puts)
-        if total_strikes > 20:
+        # ── Block 4: Valid NTM strikes count (0-2 pts) ──────────────────
+        valid_strikes_count = len(valid_calls_15) + len(valid_puts_15)
+        if valid_strikes_count > 20:
             score += 2
-        elif total_strikes > 10:
+        elif valid_strikes_count > 10:
+            score += 1.5
+        elif valid_strikes_count > 5:
             score += 1
 
-    except Exception:
-        pass
+        logger.info(
+            f"liquidity_score breakdown: "
+            f"max_oi={max_oi} valid_strikes={valid_strikes_count} "
+            f"avg_spread={(sum(valid_spreads)/len(valid_spreads)) if valid_spreads else 'n/a'} "
+            f"total_vol={total_vol} final={round(min(10.0, score), 1)}"
+        )
+
+    except Exception as e:
+        logger.warning(f"Liquidity score failed: {e}")
 
     return round(min(10.0, score), 1)
 
