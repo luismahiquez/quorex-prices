@@ -224,6 +224,43 @@ def cache_stats():
         })
     return {"total": len(cache), "entries": entries}
 
+@app.get("/vix-term")
+def get_vix_term():
+    def safe_quote(symbol):
+        try:
+            return get_quote(ticker=symbol)
+        except Exception:
+            return None
+
+    vix = safe_quote("^VIX")
+    vix3m = safe_quote("^VIX3M")
+
+    vix_price = (vix or {}).get("price")
+    vix3m_price = (vix3m or {}).get("price")
+
+    ratio = None
+    if vix_price and vix3m_price:
+        ratio = round(vix_price / vix3m_price, 3)
+
+    def pos_52w(q):
+        if not q:
+            return None
+        hi, lo, px = q.get("high52w"), q.get("low52w"), q.get("price")
+        if hi is None or lo is None or px is None or hi == lo:
+            return None
+        return round((px - lo) / (hi - lo) * 100, 1)
+
+    return {
+        "vix": vix_price,
+        "vix3m": vix3m_price,
+        "ratio": ratio,
+        "vixChangePct": (vix or {}).get("change_pct"),
+        "vixMa50": (vix or {}).get("ma50"),
+        "vixMa200": (vix or {}).get("ma200"),
+        "vixPos52w": pos_52w(vix),
+        "vix3mPos52w": pos_52w(vix3m),
+    }
+
 @app.get("/vix")
 def get_vix():
     return get_quote(ticker="^VIX")
