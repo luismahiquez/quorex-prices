@@ -228,7 +228,14 @@ def cache_stats():
 def get_vix_term():
     def safe_quote(symbol):
         try:
-            return get_quote(ticker=symbol)
+            q = get_quote(ticker=symbol)
+            if q is None:
+                return None
+            if hasattr(q, "model_dump"):
+                return q.model_dump()
+            if hasattr(q, "dict"):
+                return q.dict()
+            return dict(q)
         except Exception:
             return None
 
