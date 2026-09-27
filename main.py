@@ -3687,5 +3687,132 @@ def search_tickers(q: str):
         logger.error(f"Search error for '{q}': {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
+REFERENCE_CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 horas
+reference_cache: dict = {}
+ 
+ 
+def ref_to_date(ts) -> Optional[date]:
+    try:
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(int(ts), timezone.utc).date()
+    except Exception:
+        return None
+ 
+ 
+def ref_next_earnings(info: dict, stock) -> tuple[Optional[str], Optional[str], str]:
+    """
+    Próxima fecha de resultados (solo futuras, >= hoy).
+    Devuelve (inicio, fin, fuente). 'fin' tiene valor cuando Yahoo da un rango estimado.
+    1) info (earningsTimestampStart / earningsTimestamp / earningsTimestampEnd)
+    2) stock.calendar["Earnings Date"] como respaldo
+    """
+    today = date.today()
+ 
+    start = (
+        ref_to_date(info.get("earningsTimestampStart"))
+        or ref_to_date(info.get("earningsTimestamp"))
+    )
+    end = ref_to_date(info.get("earningsTimestampEnd"))
+ 
+    if start and start >= today:
+        if end and end <= start:
+            end = None
+        return start.isoformat(), (end.isoformat() if end else None), "info"
+ 
+    try:
+        cal = stock.calendar
+        dates = cal.get("Earnings Date") if isinstance(cal, dict) else None
+ 
+        if dates:
+            if not isinstance(dates, (list, tuple)):
+                dates = [dates]
+ 
+            parsed = sorted(
+                d for d in (pd.Timestamp(x).date() for x in dates)
+                if d >= today
+            )
+ 
+            if parsed:
+                s = parsed[0]
+                e = parsed[-1] if len(parsed) > 1 and parsed[-1] != s else None
+                return s.isoformat(), (e.isoformat() if e else None), "calendar"
+ 
+    except Exception as ex:
+        logger.warning(f"Reference calendar failed: {ex}")
+ 
+    return None, None, "none"
+ 
+ 
+@app.get("/reference/{ticker}")
+def get_reference(ticker: str):
+    symbol = ticker.strip().upper()
+ 
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Ticker is required")
+ 
+    cached = reference_cache.get(symbol)
+    if cached and time.time() - cached["timestamp"] < REFERENCE_CACHE_TTL_SECONDS:
+        return cached["data"]
+ 
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info or {}
+ 
+        quote_type = (info.get("quoteType") or "").upper() or None
+ 
+        if quote_type is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No quoteType for '{symbol}'"
+            )
+ 
+        name = (
+            info.get("longName")
+            or info.get("shortName")
+            or info.get("displayName")
+            or symbol
+        )
+ 
+        next_start = None
+        next_end = None
+        source = "not_applicable"
+        is_estimate = None
+ 
+        # Solo las acciones tienen resultados trimestrales.
+        if quote_type == "EQUITY":
+            next_start, next_end, source = ref_next_earnings(info, stock)
+            is_estimate = info.get("isEarningsDateEstimate")
+ 
+        data = {
+            "ticker": symbol,
+            "quoteType": quote_type,              # EQUITY | ETF | INDEX | ...
+            "name": name,
+            "exchange": info.get("exchange", ""),
+            "nextEarningsDate": next_start,       # yyyy-mm-dd o null
+            "nextEarningsDateEnd": next_end,      # yyyy-mm-dd si es un rango estimado
+            "earningsIsEstimate": is_estimate,    # true/false/null según Yahoo
+            "earningsSource": source,             # info | calendar | none | not_applicable
+            "fetchedAtUtc": datetime.utcnow().isoformat(),
+        }
+ 
+        reference_cache[symbol] = {"timestamp": time.time(), "data": data}
+        return data
+ 
+    except HTTPException:
+        raise
+ 
+    except Exception as e:
+        # Yahoo corta por exceso de consultas: 429 para que .NET frene la corrida.
+        if "RateLimit" in type(e).__name__ or "Too Many Requests" in str(e):
+            logger.warning(f"Reference rate limited for '{symbol}': {e}")
+            raise HTTPException(status_code=429, detail="Rate limited by Yahoo")
+ 
+        logger.error(f"Reference error for '{symbol}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Reference failed for '{symbol}': {str(e)}"
+        )
+
 
 
